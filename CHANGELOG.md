@@ -1,3 +1,10 @@
+# [1.10.0](https://github.com/Kaycee276/Chesster/compare/v1.9.4...v1.10.0) (2026-09-16)
+
+
+### Features
+
+* **database:** implement Row-Level Security (RLS) policies for all Supabase tables ([#137](https://github.com/Kaycee276/Chesster/issues/137)) ([e860208](https://github.com/Kaycee276/Chesster/commit/e86020865e2ed8f493d03d71f67903745946b475))
+
 ## [1.9.4](https://github.com/Kaycee276/Chesster/compare/v1.9.3...v1.9.4) (2026-09-07)
 
 
