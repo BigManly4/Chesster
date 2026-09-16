@@ -1,3 +1,10 @@
+## [1.10.1](https://github.com/Kaycee276/Chesster/compare/v1.10.0...v1.10.1) (2026-09-16)
+
+
+### Bug Fixes
+
+* **database:** add existence checks for optional tables in RLS migration ([#137](https://github.com/Kaycee276/Chesster/issues/137)) ([8ee29b5](https://github.com/Kaycee276/Chesster/commit/8ee29b51e552152efa0f2a668cef684e1091a85a))
+
 # [1.10.0](https://github.com/Kaycee276/Chesster/compare/v1.9.4...v1.10.0) (2026-09-16)
 
 
