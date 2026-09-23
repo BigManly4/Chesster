@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
-import { Palette, Check, Crown } from "lucide-react";
+import { Palette, Check, Crown, Sun, Moon, Laptop } from "lucide-react";
 import {
 	BOARD_THEMES,
 	PIECE_SETS,
 	useThemeStore,
 	type BoardThemeKey,
+	type ColorMode,
 } from "../store/themeStore";
 
 // Re-apply the persisted theme whenever this component mounts (covers cases
@@ -26,6 +27,8 @@ export default function ThemeSelector() {
 	const setBoardTheme = useThemeStore((s) => s.setBoardTheme);
 	const pieceSet = useThemeStore((s) => s.pieceSet);
 	const setPieceSet = useThemeStore((s) => s.setPieceSet);
+	const colorMode = useThemeStore((s) => s.colorMode);
+	const setColorMode = useThemeStore((s) => s.setColorMode);
 	const [open, setOpen] = useState(false);
 
 	useApplyThemeOnMount();
@@ -61,7 +64,7 @@ export default function ThemeSelector() {
 						<div className="flex items-center justify-between">
 							<h3 className="text-base font-bold flex items-center gap-2">
 								<Palette size={16} className="text-(--accent-primary)" />
-								Board Theme
+								Theme Settings
 							</h3>
 							<button
 								type="button"
@@ -71,6 +74,40 @@ export default function ThemeSelector() {
 							>
 								×
 							</button>
+						</div>
+
+						{/* Color Mode / Theme Switch */}
+						<div className="flex flex-col gap-2">
+							<span className="text-xs font-bold text-(--text-secondary) uppercase tracking-wider">
+								Theme Mode
+							</span>
+							<div className="grid grid-cols-3 gap-2">
+								{(
+									[
+										{ key: "system", label: "System", icon: Laptop },
+										{ key: "light", label: "Light", icon: Sun },
+										{ key: "dark", label: "Dark", icon: Moon },
+									] as const
+								).map(({ key, label, icon: Icon }) => {
+									const active = colorMode === key;
+									return (
+										<button
+											type="button"
+											key={key}
+											onClick={() => setColorMode(key as ColorMode)}
+											className={`flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl border text-xs font-semibold transition-colors ${
+												active
+													? "border-(--accent-primary) bg-(--accent-primary)/10 text-(--accent-primary) ring-1 ring-(--accent-primary)/50"
+													: "border-(--border) text-(--text-secondary) hover:text-(--text) hover:border-(--accent-primary)/40"
+											}`}
+											aria-pressed={active}
+										>
+											<Icon size={14} />
+											<span>{label}</span>
+										</button>
+									);
+								})}
+							</div>
 						</div>
 
 						<p className="text-xs text-(--text-secondary)">

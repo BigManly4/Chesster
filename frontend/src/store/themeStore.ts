@@ -87,6 +87,28 @@ export const BOARD_THEMES: BoardTheme[] = [
 
 export const DEFAULT_BOARD_THEME: BoardThemeKey = "classic";
 
+export type ColorMode = "system" | "dark" | "light";
+
+export function getResolvedColorMode(mode: ColorMode): "dark" | "light" {
+	if (mode === "system") {
+		if (typeof window !== "undefined" && window.matchMedia) {
+			return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+		}
+		return "dark";
+	}
+	return mode;
+}
+
+export function applyColorMode(mode: ColorMode) {
+	if (typeof document === "undefined") return;
+	const resolved = getResolvedColorMode(mode);
+	if (resolved === "dark") {
+		document.documentElement.classList.add("dark");
+	} else {
+		document.documentElement.classList.remove("dark");
+	}
+}
+
 function applyBoardTheme(key: BoardThemeKey) {
 	if (typeof document === "undefined") return;
 	const theme = BOARD_THEMES.find((t) => t.key === key) ?? BOARD_THEMES[0];
@@ -97,8 +119,10 @@ function applyBoardTheme(key: BoardThemeKey) {
 interface ThemeState {
 	boardTheme: BoardThemeKey;
 	pieceSet: PieceSetKey;
+	colorMode: ColorMode;
 	setBoardTheme: (key: BoardThemeKey) => void;
 	setPieceSet: (key: PieceSetKey) => void;
+	setColorMode: (mode: ColorMode) => void;
 }
 
 export const useThemeStore = create<ThemeState>()(
@@ -106,19 +130,29 @@ export const useThemeStore = create<ThemeState>()(
 		(set) => ({
 			boardTheme: DEFAULT_BOARD_THEME,
 			pieceSet: "standard" as PieceSetKey,
+			colorMode: "system" as ColorMode,
 			setBoardTheme: (key) => {
 				applyBoardTheme(key);
 				set({ boardTheme: key });
 			},
 			setPieceSet: (key) => set({ pieceSet: key }),
+			setColorMode: (mode) => {
+				applyColorMode(mode);
+				set({ colorMode: mode });
+			},
 		}),
 		{
 			name: "chesster-theme",
-			partialize: (state) => ({ boardTheme: state.boardTheme, pieceSet: state.pieceSet }),
+			partialize: (state) => ({
+				boardTheme: state.boardTheme,
+				pieceSet: state.pieceSet,
+				colorMode: state.colorMode,
+			}),
 		},
 	),
 );
 
-// Apply the persisted (or default) board theme as soon as the module loads so
-// the board renders with the correct colours before React mounts.
+// Apply the persisted (or default) board theme and color mode as soon as the module loads.
 applyBoardTheme(useThemeStore.getState().boardTheme);
+applyColorMode(useThemeStore.getState().colorMode);
+
