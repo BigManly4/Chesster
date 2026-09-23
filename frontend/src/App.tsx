@@ -6,13 +6,28 @@ import SpectatorPage from "./pages/SpectatorPage";
 import Toast from "./components/Toast";
 import ThemeSelector from "./components/ThemeSelector";
 import { useWalletStore } from "./store/walletStore";
+import { useThemeStore, applyColorMode } from "./store/themeStore";
 
 const App = () => {
 	const { checkConnection } = useWalletStore();
+	const colorMode = useThemeStore((s) => s.colorMode);
 
 	useEffect(() => {
 		checkConnection();
 	}, [checkConnection]);
+
+	useEffect(() => {
+		applyColorMode(colorMode);
+		if (typeof window === "undefined" || !window.matchMedia) return;
+		const mediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
+		const handleChange = () => {
+			if (useThemeStore.getState().colorMode === "system") {
+				applyColorMode("system");
+			}
+		};
+		mediaQuery.addEventListener("change", handleChange);
+		return () => mediaQuery.removeEventListener("change", handleChange);
+	}, [colorMode]);
 
 	return (
 		<BrowserRouter>

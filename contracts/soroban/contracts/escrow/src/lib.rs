@@ -2282,6 +2282,17 @@ impl ChessterEscrow {
         Self::load_match(&env, &game_code)
     }
 
+    /// Extends the persistent storage and instance TTL for a match record to prevent ledger eviction (Issue #29).
+    ///
+    /// # Arguments
+    /// * `env` - Environment reference.
+    /// * `game_code` - Unique match game code.
+    pub fn extend_match_ttl(env: Env, game_code: String) {
+        Self::load_match(&env, &game_code);
+        Self::bump_entry_ttl(&env, &game_code);
+        Self::bump_instance_ttl(&env);
+    }
+
     /// Retrieves cancellation request status for both players (Issue #37).
     ///
     /// # Arguments
@@ -2406,6 +2417,15 @@ impl ChessterEscrow {
                 resolution.winner.clone(),
             );
         }
+    }
+
+    /// Coordinator resolves up to `MAX_BATCH_RESOLUTIONS` tournament matches in a single atomic transaction (Issue #25).
+    ///
+    /// # Arguments
+    /// * `env` - Environment reference.
+    /// * `resolutions` - Vector of match resolutions.
+    pub fn batch_resolve_tournament_matches(env: Env, resolutions: Vec<BatchResolution>) {
+        Self::batch_resolve_matches(env, resolutions);
     }
 
     /// Cleans up settled or refunded matches older than 30 days (`STALE_MATCH_THRESHOLD_SECS`) from storage (Issue #41).
