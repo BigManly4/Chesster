@@ -44,5 +44,5 @@ Thumbs.db
 .claude
 .gemini
 .agents/
-!.agents/skills/
+.agents/skills/
 
