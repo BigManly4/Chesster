@@ -1,3 +1,10 @@
+# [1.11.0](https://github.com/Kaycee276/Chesster/compare/v1.10.1...v1.11.0) (2026-09-23)
+
+
+### Features
+
+* implement contract storage TTL, allowance check, batch resolution, and theme mode ([79afb68](https://github.com/Kaycee276/Chesster/commit/79afb68966be423461f4ddf5848001784cc2c2d5)), closes [#29](https://github.com/Kaycee276/Chesster/issues/29) [#27](https://github.com/Kaycee276/Chesster/issues/27) [#25](https://github.com/Kaycee276/Chesster/issues/25) [#129](https://github.com/Kaycee276/Chesster/issues/129)
+
 ## [1.10.1](https://github.com/Kaycee276/Chesster/compare/v1.10.0...v1.10.1) (2026-09-16)
 
 
