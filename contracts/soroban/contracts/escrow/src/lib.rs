@@ -2546,7 +2546,11 @@ impl ChessterEscrow {
         }
 
         let effective_min = if min_players < 2 { 2 } else { min_players };
-        let effective_max = if max_players < effective_min { effective_min } else { max_players };
+        let effective_max = if max_players < effective_min {
+            effective_min
+        } else {
+            max_players
+        };
 
         let tournament = TournamentPrizePool {
             tournament_id: tournament_id.clone(),
@@ -2620,7 +2624,7 @@ impl ChessterEscrow {
             panic_with_error!(&env, EscrowError::TournamentNotRefundable);
         }
 
-        if tournament.max_players > 0 && (tournament.players.len() as u32) >= tournament.max_players {
+        if tournament.max_players > 0 && tournament.players.len() >= tournament.max_players {
             panic_with_error!(&env, EscrowError::TournamentFull);
         }
 
@@ -2637,11 +2641,14 @@ impl ChessterEscrow {
         );
 
         tournament.players.push_back(player.clone());
-        tournament.total_pool = tournament.total_pool.checked_add(tournament.buy_in_amount).unwrap();
+        tournament.total_pool = tournament
+            .total_pool
+            .checked_add(tournament.buy_in_amount)
+            .unwrap();
 
         Self::add_locked(&env, &tournament.token, tournament.buy_in_amount);
 
-        if tournament.max_players > 0 && (tournament.players.len() as u32) == tournament.max_players {
+        if tournament.max_players > 0 && tournament.players.len() == tournament.max_players {
             tournament.status = TournamentStatus::Active;
         }
 
@@ -2679,7 +2686,9 @@ impl ChessterEscrow {
             .unwrap_or_else(|| panic_with_error!(&env, EscrowError::InvalidTournament));
         Self::bump_entry_ttl(&env, &tournament_id);
 
-        if tournament.status != TournamentStatus::Open && tournament.status != TournamentStatus::Active {
+        if tournament.status != TournamentStatus::Open
+            && tournament.status != TournamentStatus::Active
+        {
             panic_with_error!(&env, EscrowError::InvalidTournament);
         }
 
@@ -2705,7 +2714,8 @@ impl ChessterEscrow {
 
         let token_client = token::Client::new(&env, &tournament.token);
         if rake > 0 {
-            let recipient = Self::get_treasury_vault(env.clone()).unwrap_or_else(|| coordinator.clone());
+            let recipient =
+                Self::get_treasury_vault(env.clone()).unwrap_or_else(|| coordinator.clone());
             token_client.transfer(&env.current_contract_address(), &recipient, &rake);
         }
 
@@ -2758,14 +2768,16 @@ impl ChessterEscrow {
             .unwrap_or_else(|| panic_with_error!(&env, EscrowError::InvalidTournament));
         Self::bump_entry_ttl(&env, &tournament_id);
 
-        if tournament.status == TournamentStatus::Completed || tournament.status == TournamentStatus::Cancelled {
+        if tournament.status == TournamentStatus::Completed
+            || tournament.status == TournamentStatus::Cancelled
+        {
             panic_with_error!(&env, EscrowError::InvalidTournament);
         }
 
         let now = env.ledger().timestamp();
         let quorum_failed = tournament.registration_deadline > 0
             && now > tournament.registration_deadline
-            && (tournament.players.len() as u32) < tournament.min_players;
+            && tournament.players.len() < tournament.min_players;
 
         if !quorum_failed {
             let coordinator = Self::get_coordinator(env.clone());
@@ -2796,7 +2808,7 @@ impl ChessterEscrow {
         let now = env.ledger().timestamp();
         let quorum_failed = tournament.registration_deadline > 0
             && now > tournament.registration_deadline
-            && (tournament.players.len() as u32) < tournament.min_players;
+            && tournament.players.len() < tournament.min_players;
 
         if tournament.status != TournamentStatus::Cancelled && !quorum_failed {
             panic_with_error!(&env, EscrowError::TournamentNotRefundable);
@@ -2812,7 +2824,11 @@ impl ChessterEscrow {
             panic_with_error!(&env, EscrowError::Unauthorized);
         }
 
-        let refund_key = (Symbol::new(&env, "ref_clm"), tournament_id.clone(), player.clone());
+        let refund_key = (
+            Symbol::new(&env, "ref_clm"),
+            tournament_id.clone(),
+            player.clone(),
+        );
         if env.storage().persistent().has(&refund_key) {
             panic_with_error!(&env, EscrowError::AlreadyRefunded);
         }

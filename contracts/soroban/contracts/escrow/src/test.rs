@@ -686,7 +686,10 @@ fn test_tournament_refund_workflow() {
     // Self-service refund succeeds and sets status to Cancelled
     client.claim_tournament_refund(&tourn_quorum, &p1);
     assert_eq!(token.balance(&p1), 1000);
-    assert_eq!(client.get_tournament(&tourn_quorum).status, TournamentStatus::Cancelled);
+    assert_eq!(
+        client.get_tournament(&tourn_quorum).status,
+        TournamentStatus::Cancelled
+    );
 
     client.claim_tournament_refund(&tourn_quorum, &p2);
     assert_eq!(token.balance(&p2), 1000);
