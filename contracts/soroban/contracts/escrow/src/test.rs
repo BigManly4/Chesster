@@ -611,7 +611,10 @@ fn test_tournament_fee_deduction() {
     // Verify zero token leakage or dust accumulation in the escrow contract balance
     assert_eq!(token.balance(&contract_id), 0);
     // Verify conservation: 10 + 142 + 48 == 200
-    assert_eq!(10 + (token.balance(&player1) - 900) + (token.balance(&player2) - 900), 200);
+    assert_eq!(
+        10 + (token.balance(&player1) - 900) + (token.balance(&player2) - 900),
+        200
+    );
 }
 
 #[test]
@@ -672,7 +675,7 @@ fn test_disqualification_and_redistribution() {
     // Disqualify player1 (cheating / forfeit reason code 99)
     client.disqualify_participant(&tournament_id, &player1, &99);
     let tournament_dq = client.get_tournament(&tournament_id);
-    assert_eq!(tournament_dq.disqualified.get(player1.clone()).unwrap(), true);
+    assert!(tournament_dq.disqualified.get(player1.clone()).unwrap());
 
     // Complete tournament with player1 ranked 1st and player2 ranked 2nd
     let final_rankings = vec![&env, player1.clone(), player2.clone()];

@@ -2701,10 +2701,8 @@ impl ChessterEscrow {
                         distributed_so_far += net_prize;
 
                         if net_prize > 0 {
-                            let is_disqualified = tournament
-                                .disqualified
-                                .get(winner.clone())
-                                .unwrap_or(false);
+                            let is_disqualified =
+                                tournament.disqualified.get(winner.clone()).unwrap_or(false);
 
                             if is_disqualified {
                                 // Slashed prize is routed directly to the treasury pool (Issue #222)
@@ -2730,7 +2728,11 @@ impl ChessterEscrow {
                 token_client.transfer(&env.current_contract_address(), &fee_recipient, &remainder);
             }
         } else if net_prize_pool > 0 {
-            token_client.transfer(&env.current_contract_address(), &fee_recipient, &net_prize_pool);
+            token_client.transfer(
+                &env.current_contract_address(),
+                &fee_recipient,
+                &net_prize_pool,
+            );
         }
 
         tournament.status = TournamentStatus::Completed;
@@ -2792,7 +2794,8 @@ impl ChessterEscrow {
         env.storage().persistent().set(&tournament_id, &tournament);
         Self::bump_entry_ttl(&env, &tournament_id);
 
-        env.events().publish((symbol_short!("tourn_stg"), tournament_id), stage);
+        env.events()
+            .publish((symbol_short!("tourn_stg"), tournament_id), stage);
     }
 
     /// Retrieves tournament details.
