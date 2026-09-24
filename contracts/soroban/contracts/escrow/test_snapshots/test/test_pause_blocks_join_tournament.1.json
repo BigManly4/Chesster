@@ -419,6 +419,14 @@
                     },
                     {
                       "key": {
+                        "symbol": "disqualified"
+                      },
+                      "val": {
+                        "map": []
+                      }
+                    },
+                    {
+                      "key": {
                         "symbol": "final_rankings"
                       },
                       "val": {
@@ -446,6 +454,14 @@
                             }
                           }
                         ]
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "stage"
+                      },
+                      "val": {
+                        "u32": 0
                       }
                     },
                     {
