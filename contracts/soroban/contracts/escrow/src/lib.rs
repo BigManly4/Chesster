@@ -769,7 +769,7 @@ impl ChessterEscrow {
         if fee_bps > MAX_TOURNAMENT_FEE_BPS {
             panic_with_error!(&env, EscrowError::InvalidWager);
         }
-        let key = Symbol::new(&env, "trn_fee");
+        let key = symbol_short!("trn_fee");
         env.storage().persistent().set(&key, &fee_bps);
         Self::bump_entry_ttl(&env, &key);
         env.storage().instance().set(&key, &fee_bps);
@@ -783,7 +783,7 @@ impl ChessterEscrow {
     /// # Returns
     /// * `u32` - Tournament fee basis points. Defaults to 0.
     pub fn get_tournament_fee_bps(env: Env) -> u32 {
-        let key = Symbol::new(&env, "trn_fee");
+        let key = symbol_short!("trn_fee");
         if let Some(bps) = env.storage().persistent().get(&key) {
             bps
         } else {
@@ -2629,27 +2629,8 @@ impl ChessterEscrow {
         Self::bump_entry_ttl(&env, &tournament_id);
 
         env.events().publish(
-            (Symbol::new(&env, "tourn_crt"), tournament_id),
+            (symbol_short!("tourn_crt"), tournament_id),
             (buy_in_amount, effective_max, effective_min),
-        );
-    }
-
-    /// Convenience helper to create a tournament with default min_players and deadline.
-    pub fn create_tournament_simple(
-        env: Env,
-        tournament_id: String,
-        buy_in_amount: i128,
-        max_players: u32,
-        token: Address,
-    ) {
-        Self::create_tournament(
-            env.clone(),
-            tournament_id,
-            buy_in_amount,
-            max_players,
-            2,
-            0,
-            token,
         );
     }
 
@@ -2715,7 +2696,7 @@ impl ChessterEscrow {
         Self::assert_balance_invariant(&env, &tournament.token);
 
         env.events().publish(
-            (Symbol::new(&env, "tourn_jn"), tournament_id, player),
+            (symbol_short!("tourn_jn"), tournament_id, player),
             tournament.total_pool,
         );
     }
@@ -2818,7 +2799,7 @@ impl ChessterEscrow {
         Self::bump_entry_ttl(&env, &tournament_id);
 
         env.events().publish(
-            (Symbol::new(&env, "tourn_cmp"), tournament_id),
+            (symbol_short!("tourn_cmp"), tournament_id),
             (winners, tournament.total_pool, rake),
         );
     }
@@ -2856,7 +2837,7 @@ impl ChessterEscrow {
         Self::bump_entry_ttl(&env, &tournament_id);
 
         env.events().publish(
-            (Symbol::new(&env, "tourn_can"), tournament_id),
+            (symbol_short!("tourn_can"), tournament_id),
             tournament.players.len(),
         );
     }
@@ -2892,7 +2873,7 @@ impl ChessterEscrow {
         }
 
         let refund_key = (
-            Symbol::new(&env, "ref_clm"),
+            symbol_short!("ref_clm"),
             tournament_id.clone(),
             player.clone(),
         );
@@ -2914,15 +2895,15 @@ impl ChessterEscrow {
         Self::assert_balance_invariant(&env, &tournament.token);
 
         env.events().publish(
-            (Symbol::new(&env, "tourn_ref"), tournament_id, player),
+            (symbol_short!("tourn_ref"), tournament_id, player),
             tournament.buy_in_amount,
         );
     }
 
     /// Returns whether a player has claimed their refund for a tournament.
     pub fn is_refund_claimed(env: Env, tournament_id: String, player: Address) -> bool {
-        let refund_key = (Symbol::new(&env, "ref_clm"), tournament_id, player);
-        env.storage().persistent().get(&refund_key).unwrap_or(false)
+        let refund_key = (symbol_short!("ref_clm"), tournament_id, player);
+        env.storage().persistent().has(&refund_key)
     }
 
     /// Disqualifies a tournament participant (Issue #222).
