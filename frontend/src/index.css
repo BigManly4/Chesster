@@ -82,6 +82,15 @@ html {
 	overflow: hidden;
 }
 
+/* Chessboard squares/pieces are drag targets on touch devices — disable
+   the browser's native pan/zoom/pull-to-refresh gestures over them so a
+   piece drag never scrolls the page. */
+.board-square {
+	touch-action: none;
+	-webkit-touch-callout: none;
+	user-select: none;
+}
+
 /* Custom scrollbar */
 ::-webkit-scrollbar {
 	width: 8px;
