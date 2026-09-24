@@ -4,7 +4,7 @@ import { useGameStore } from "../store/gameStore";
 import { useToastStore } from "../store/toastStore";
 import { useWalletStore } from "../store/walletStore";
 import { api } from "../api/gameApi";
-import { Clock, Users, ChevronRight } from "lucide-react";
+import { Clock, Users, ChevronRight, Trophy } from "lucide-react";
 import { depositXLM } from "../services/stellarService";
 import WalletDropdown from "./WalletDropdown";
 
@@ -513,7 +513,18 @@ export default function GameLobby() {
 
 			{/* ── Header bar ── */}
 			<header className="shrink-0 h-14 flex items-center justify-between px-5 sm:px-8 border-b border-(--border)/40">
-				<h1 className="text-xl font-bold tracking-tight">Chesster</h1>
+				<div className="flex items-center gap-4">
+					<h1 className="text-xl font-bold tracking-tight">Chesster</h1>
+					<nav className="flex items-center gap-1">
+						<button
+							onClick={() => navigate("/tournaments")}
+							className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-semibold text-(--text-secondary) hover:text-(--text) hover:bg-(--bg-tertiary) transition-colors"
+						>
+							<Trophy size={14} className="text-(--accent-primary)" />
+							Tournaments
+						</button>
+					</nav>
+				</div>
 				<p className="text-(--text-tertiary) text-xs hidden md:block">
 					{isConnected
 						? "Create or join a game below"
