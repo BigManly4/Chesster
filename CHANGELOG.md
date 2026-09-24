@@ -1,3 +1,15 @@
+# [1.14.0](https://github.com/Kaycee276/Chesster/compare/v1.13.0...v1.14.0) (2026-09-24)
+
+
+### Features
+
+* **tournament:** implement on-chain prize escrow, refund window, bracket seeding, and round advancement ([709f2fc](https://github.com/Kaycee276/Chesster/commit/709f2fcdf4a15c7f7a845e3b5e6b2dc8a8b9339d)), closes [#219](https://github.com/Kaycee276/Chesster/issues/219) [#220](https://github.com/Kaycee276/Chesster/issues/220) [#223](https://github.com/Kaycee276/Chesster/issues/223) [#224](https://github.com/Kaycee276/Chesster/issues/224)
+
+
+### Performance Improvements
+
+* **contracts:** optimize contract WASM size within 64 KB budget limit ([8e14730](https://github.com/Kaycee276/Chesster/commit/8e1473031ecd98a292ee3558fb3ab2ba12daa4d2))
+
 # [1.13.0](https://github.com/Kaycee276/Chesster/compare/v1.12.0...v1.13.0) (2026-09-24)
 
 
