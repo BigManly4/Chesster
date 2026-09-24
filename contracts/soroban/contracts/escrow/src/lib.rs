@@ -244,6 +244,26 @@ pub struct BatchResolution {
     pub winner: Option<Address>,
 }
 
+pub const FLAG_CANCEL_P1: u32 = 1 << 0;
+pub const FLAG_CANCEL_P2: u32 = 1 << 1;
+pub const FLAG_DRAW_P1: u32 = 1 << 2;
+pub const FLAG_DRAW_P2: u32 = 1 << 3;
+
+#[inline]
+pub fn has_flag(flags: u32, flag: u32) -> bool {
+    (flags & flag) != 0
+}
+
+#[inline]
+pub fn set_flag(flags: u32, flag: u32) -> u32 {
+    flags | flag
+}
+
+#[inline]
+pub fn clear_flag(flags: u32, flag: u32) -> u32 {
+    flags & !flag
+}
+
 /// Full details and state representation of an escrow match.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -268,14 +288,8 @@ pub struct Match {
     pub token: Address,
     /// Match creation sequence nonce.
     pub nonce: u64,
-    /// Mutual cancellation request indicator for Player 1.
-    pub cancel_requested_player1: bool,
-    /// Mutual cancellation request indicator for Player 2.
-    pub cancel_requested_player2: bool,
-    /// Cooperative draw request indicator for Player 1.
-    pub draw_requested_player1: bool,
-    /// Cooperative draw request indicator for Player 2.
-    pub draw_requested_player2: bool,
+    /// Bitmask flags for match state.
+    pub flags: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -1560,10 +1574,7 @@ impl ChessterEscrow {
             winner: None,
             token: token.clone(),
             nonce: next_nonce,
-            cancel_requested_player1: false,
-            cancel_requested_player2: false,
-            draw_requested_player1: false,
-            draw_requested_player2: false,
+            flags: 0,
         };
 
         env.storage().persistent().set(&game_code, &m);
@@ -1776,17 +1787,17 @@ impl ChessterEscrow {
         }
 
         if player == m.player1 {
-            m.cancel_requested_player1 = true;
+            m.flags = set_flag(m.flags, FLAG_CANCEL_P1);
         } else if Some(player.clone()) == m.player2 {
-            m.cancel_requested_player2 = true;
+            m.flags = set_flag(m.flags, FLAG_CANCEL_P2);
         } else {
             panic_with_error!(&env, EscrowError::Unauthorized);
         }
 
         let is_canceled = if m.player2.is_none() {
-            m.cancel_requested_player1
+            has_flag(m.flags, FLAG_CANCEL_P1)
         } else {
-            m.cancel_requested_player1 && m.cancel_requested_player2
+            has_flag(m.flags, FLAG_CANCEL_P1) && has_flag(m.flags, FLAG_CANCEL_P2)
         };
 
         if is_canceled {
@@ -1910,14 +1921,14 @@ impl ChessterEscrow {
         }
 
         if player == m.player1 {
-            m.draw_requested_player1 = true;
+            m.flags = set_flag(m.flags, FLAG_DRAW_P1);
         } else if Some(player.clone()) == m.player2 {
-            m.draw_requested_player2 = true;
+            m.flags = set_flag(m.flags, FLAG_DRAW_P2);
         } else {
             panic_with_error!(&env, EscrowError::Unauthorized);
         }
 
-        if m.draw_requested_player1 && m.draw_requested_player2 {
+        if has_flag(m.flags, FLAG_DRAW_P1) && has_flag(m.flags, FLAG_DRAW_P2) {
             let coordinator = Self::get_coordinator(env.clone());
             Self::settle_match(&env, &coordinator, &game_code, &mut m, None);
 
@@ -1945,7 +1956,10 @@ impl ChessterEscrow {
     /// * `(bool, bool)` - Tuple of `(draw_requested_player1, draw_requested_player2)`.
     pub fn get_draw_status(env: Env, game_code: String) -> (bool, bool) {
         let m = Self::load_match(&env, &game_code);
-        (m.draw_requested_player1, m.draw_requested_player2)
+        (
+            has_flag(m.flags, FLAG_DRAW_P1),
+            has_flag(m.flags, FLAG_DRAW_P2),
+        )
     }
 
     /// Coordinator resolves active match, distributing payouts and fee discounts (Issues #35 & #36).
@@ -2377,7 +2391,10 @@ impl ChessterEscrow {
     /// * `(bool, bool)` - Tuple of `(cancel_requested_player1, cancel_requested_player2)`.
     pub fn get_cancellation_status(env: Env, game_code: String) -> (bool, bool) {
         let m = Self::load_match(&env, &game_code);
-        (m.cancel_requested_player1, m.cancel_requested_player2)
+        (
+            has_flag(m.flags, FLAG_CANCEL_P1),
+            has_flag(m.flags, FLAG_CANCEL_P2),
+        )
     }
 
     /// Raises a dispute on active match, locking funds into 48-hour timelock queue (Issue #27).
