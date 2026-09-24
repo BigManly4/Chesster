@@ -1,3 +1,10 @@
+# [1.15.0](https://github.com/Kaycee276/Chesster/compare/v1.14.0...v1.15.0) (2026-09-24)
+
+
+### Features
+
+* **contracts:** Implement Batch Settlement Function for Concurrent Escrows ([516f067](https://github.com/Kaycee276/Chesster/commit/516f067e61e0ea003772db1a20078e319a528429)), closes [#236](https://github.com/Kaycee276/Chesster/issues/236)
+
 # [1.14.0](https://github.com/Kaycee276/Chesster/compare/v1.13.0...v1.14.0) (2026-09-24)
 
 
