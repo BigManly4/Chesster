@@ -700,7 +700,7 @@ fn test_tournament_refund_workflow() {
 }
 
 // ---------------------------------------------------------------------------
-// Issue #221 — Tournament Tiered Rake & Treasury Protocol Fee Deduction
+// Issue #221 â€” Tournament Tiered Rake & Treasury Protocol Fee Deduction
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -788,7 +788,7 @@ fn test_set_tournament_fee_bps_rejects_above_cap() {
 }
 
 // ---------------------------------------------------------------------------
-// Issue #222 — Tournament Stage Checkpoints and Disqualification Slashing
+// Issue #222 â€” Tournament Stage Checkpoints and Disqualification Slashing
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -847,7 +847,7 @@ fn test_disqualification_and_redistribution() {
 }
 
 // ---------------------------------------------------------------------------
-// Issue #40 — Multi-Token Whitelist Registry
+// Issue #40 â€” Multi-Token Whitelist Registry
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -950,7 +950,7 @@ fn test_create_match_rejects_after_delisting() {
 }
 
 // ---------------------------------------------------------------------------
-// Issue #39 — Match Forfeit Resolution Trigger for Disconnects
+// Issue #39 â€” Match Forfeit Resolution Trigger for Disconnects
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -1079,7 +1079,7 @@ fn test_forfeit_match_rejects_pending_match() {
     let game_code = String::from_str(&env, "GAME_FORFEIT_PENDING");
     approve(&env, &token, &player1, &contract_id, 1000);
     client.create_match(&game_code, &player1, &token.address, &100);
-    // Player 2 never joined — match is still Pending, not Active.
+    // Player 2 never joined â€” match is still Pending, not Active.
 
     client.forfeit_match(&game_code, &player1);
 }
@@ -1123,7 +1123,7 @@ fn test_forfeit_match_settles_side_pool() {
 }
 
 // ---------------------------------------------------------------------------
-// Issue #24 — Typed Soroban Contract Events on Escrow State Transitions
+// Issue #24 â€” Typed Soroban Contract Events on Escrow State Transitions
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -1700,7 +1700,7 @@ fn test_upgrade_requires_coordinator() {
 }
 
 // ---------------------------------------------------------------------------
-// Issue #22 – Contract Pause / Unpause (circuit breaker) tests
+// Issue #22 â€“ Contract Pause / Unpause (circuit breaker) tests
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -1960,7 +1960,7 @@ fn test_unpause_emits_unpaused_event() {
 #[test]
 fn test_pause_requires_coordinator_auth() {
     let env = Env::default();
-    // Do NOT mock all auths — only mock specific ones
+    // Do NOT mock all auths â€” only mock specific ones
     let coordinator = Address::generate(&env);
     let non_coordinator = Address::generate(&env);
 
@@ -2221,13 +2221,15 @@ fn test_multi_match_batch_resolution_for_tournament_escrows() {
     client.join_match(&game2, &player4);
 
     let mut resolutions = Vec::new(&env);
-    resolutions.push_back(BatchResolution {
-        game_code: game1.clone(),
+    resolutions.push_back(MatchResolution {
+        match_id: game1.clone(),
         winner: Some(player1.clone()),
+        moves_hash: String::from_str(&env, "hash1"),
     });
-    resolutions.push_back(BatchResolution {
-        game_code: game2.clone(),
+    resolutions.push_back(MatchResolution {
+        match_id: game2.clone(),
         winner: None, // Draw
+        moves_hash: String::from_str(&env, "hash2"),
     });
 
     client.batch_resolve_tournament_matches(&resolutions);
@@ -2269,10 +2271,55 @@ fn test_batch_resolve_matches_rejects_exceeding_max() {
 
     let mut resolutions = Vec::new(&env);
     for _ in 0..11 {
-        resolutions.push_back(BatchResolution {
-            game_code: String::from_str(&env, "G"),
+        resolutions.push_back(MatchResolution {
+            match_id: String::from_str(&env, "G"),
             winner: None,
+            moves_hash: String::from_str(&env, "hash"),
         });
     }
     client.batch_resolve_tournament_matches(&resolutions);
+}
+
+#[test]
+fn test_batch_resolve_five_matches() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let coordinator = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+
+    let (token, token_admin_client) = create_token_contract(&env, &token_admin);
+    let contract_id = env.register(ChessterEscrow, ());
+    let client = ChessterEscrowClient::new(&env, &contract_id);
+
+    client.init(&coordinator, &500);
+    client.add_whitelisted_token(&token.address);
+
+    let mut resolutions = Vec::new(&env);
+    for i in 0..5 {
+        let p1 = Address::generate(&env);
+        let p2 = Address::generate(&env);
+        token_admin_client.mint(&p1, &1000);
+        token_admin_client.mint(&p2, &1000);
+
+        let game_code = String::from_str(&env, &alloc::format!("GAME{}", i));
+        approve(&env, &token, &p1, &contract_id, 100);
+        approve(&env, &token, &p2, &contract_id, 100);
+        client.create_match(&game_code, &p1, &token.address, &100);
+        client.join_match(&game_code, &p2);
+
+        resolutions.push_back(MatchResolution {
+            match_id: game_code.clone(),
+            winner: Some(p1.clone()),
+            moves_hash: String::from_str(&env, "hash"),
+        });
+    }
+
+    client.batch_resolve_matches(&resolutions);
+
+    for i in 0..5 {
+        let game_code = String::from_str(&env, &alloc::format!("GAME{}", i));
+        let m = client.get_match(&game_code);
+        assert_eq!(m.status, MatchStatus::Resolved);
+    }
 }
