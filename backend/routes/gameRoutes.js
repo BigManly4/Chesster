@@ -287,6 +287,23 @@ router.post('/games/:gameCode/undo/accept', gameController.acceptUndoMove);
  *         description: Undo rejected
  */
 router.post('/games/:gameCode/undo/reject', gameController.rejectUndoMove);
+/**
+ * @openapi
+ * /api/games/{gameCode}/end:
+ *   post:
+ *     summary: End a game match and advance tournament bracket
+ *     tags: [Games]
+ *     parameters:
+ *       - in: path
+ *         name: gameCode
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Game ended successfully
+ */
+router.post('/games/:gameCode/end', gameController.endGame);
 
 /**
  * @openapi

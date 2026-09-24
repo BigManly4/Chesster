@@ -108,6 +108,19 @@ class GameController {
 			} else {
 				timerService.clearTimer(gameCode);
 				timerService.clearClock(gameCode);
+
+				// If tournament match concluded, advance round
+				if (game.status === "finished") {
+					try {
+						const tournamentModel = require("../models/tournamentModel");
+						const tournamentService = require("../services/tournamentService");
+						const match = await tournamentModel.getMatchByGameCode(gameCode);
+						const winningAddress = game.winner === "white" ? game.player_white_address : game.player_black_address;
+						if (match && winningAddress) {
+							tournamentService.advanceRound(match.tournament_id, match.id, winningAddress).catch(() => {});
+						}
+					} catch { /* non-critical */ }
+				}
 			}
 
 			const io = req.app.get("io");
@@ -137,6 +150,17 @@ class GameController {
 
 			timerService.clearTimer(gameCode);
 			timerService.clearClock(gameCode);
+
+			// If tournament match concluded, advance round
+			try {
+				const tournamentModel = require("../models/tournamentModel");
+				const tournamentService = require("../services/tournamentService");
+				const match = await tournamentModel.getMatchByGameCode(gameCode);
+				const winningAddress = playerColor === "white" ? game.player_black_address : game.player_white_address;
+				if (match && winningAddress) {
+					tournamentService.advanceRound(match.tournament_id, match.id, winningAddress).catch(() => {});
+				}
+			} catch { /* non-critical */ }
 
 			const io = req.app.get("io");
 			io.to(gameCode).emit("game-update", game);
@@ -264,6 +288,65 @@ class GameController {
 			res.json({ success: true, data: game });
 		} catch (error) {
 			res.status(400).json({ success: false, error: error.message });
+		}
+	}
+
+	/**
+	 * Concludes a game, settles timers, and hooks into tournament advancement if linked to a match.
+	 */
+	async endGame(req, res) {
+		try {
+			const { gameCode } = req.params;
+			const { winner, winnerAddress, endReason } = req.body;
+
+			const tournamentModel = require("../models/tournamentModel");
+			const tournamentService = require("../services/tournamentService");
+
+			const game = await gameModel.getGame(gameCode);
+			if (!game) {
+				return res.status(404).json({ success: false, error: "Game not found" });
+			}
+
+			let winningAddress = winnerAddress;
+			if (!winningAddress) {
+				if (winner === "white") winningAddress = game.player_white_address;
+				else if (winner === "black") winningAddress = game.player_black_address;
+			}
+
+			let tournamentAdvancement = null;
+			const match = await tournamentModel.getMatchByGameCode(gameCode);
+			if (match && winningAddress) {
+				tournamentAdvancement = await tournamentService.advanceRound(
+					match.tournament_id,
+					match.id,
+					winningAddress,
+				);
+			}
+
+			timerService.clearTimer(gameCode);
+			timerService.clearClock(gameCode);
+
+			const io = req.app.get("io");
+			if (io) {
+				io.to(gameCode).emit("game-ended", {
+					gameCode,
+					winner,
+					winnerAddress: winningAddress,
+					endReason: endReason || "conclusion",
+				});
+			}
+
+			res.json({
+				success: true,
+				data: {
+					gameCode,
+					winner,
+					winnerAddress: winningAddress,
+					tournamentAdvancement,
+				},
+			});
+		} catch (error) {
+			res.status(500).json({ success: false, error: error.message });
 		}
 	}
 }
