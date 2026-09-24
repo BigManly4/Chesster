@@ -104,6 +104,14 @@ pub enum EscrowError {
     ReentrancyGuard = 37,
     /// Contract balance invariant check failed.
     InvariantViolated = 38,
+    /// Tournament entry fee has already been refunded to player.
+    AlreadyRefunded = 39,
+    /// Tournament is not eligible for refund (not cancelled and deadline not reached).
+    TournamentNotRefundable = 40,
+    /// Payout distribution basis points sum must equal 10,000 (100%).
+    InvalidPayoutDistribution = 41,
+    /// Tournament has reached its maximum player capacity.
+    TournamentFull = 42,
 }
 
 /// Lifecycle status of a chess match escrow.
@@ -130,6 +138,8 @@ pub enum TournamentStatus {
     Active = 1,
     /// Tournament completed and prize distribution finished.
     Completed = 2,
+    /// Tournament cancelled and refunds enabled.
+    Cancelled = 3,
 }
 
 /// Spectator side bet entry on match winner.
@@ -180,7 +190,15 @@ pub struct TournamentPrizePool {
     pub created_at: u64,
     /// Token address used for buy-ins and prizes.
     pub token: Address,
+    /// Maximum number of players allowed to join.
+    pub max_players: u32,
+    /// Minimum players required to form valid bracket without cancellation.
+    pub min_players: u32,
+    /// Registration deadline ledger timestamp.
+    pub registration_deadline: u64,
 }
+
+pub type Tournament = TournamentPrizePool;
 
 /// Status of a match dispute.
 #[contracttype]
@@ -2490,15 +2508,22 @@ impl ChessterEscrow {
     /// * `env` - Environment reference.
     /// * `tournament_id` - Unique tournament identifier.
     /// * `buy_in_amount` - Required buy-in amount per player.
-    /// * `prize_distribution` - Vector of prize amounts.
+    /// * `max_players` - Maximum player capacity.
+    /// * `min_players` - Minimum player threshold for quorum.
+    /// * `registration_deadline` - Timestamp cutoff for joining.
     /// * `token` - Token address used for tournament pool.
     pub fn create_tournament(
         env: Env,
         tournament_id: String,
         buy_in_amount: i128,
-        prize_distribution: Vec<i128>,
+        max_players: u32,
+        min_players: u32,
+        registration_deadline: u64,
         token: Address,
     ) {
+        let coordinator = Self::get_coordinator(env.clone());
+        coordinator.require_auth();
+
         if Self::is_paused(env.clone()) {
             panic_with_error!(&env, EscrowError::ContractPaused);
         }
@@ -2520,20 +2545,50 @@ impl ChessterEscrow {
             panic_with_error!(&env, EscrowError::InvalidWager);
         }
 
+        let effective_min = if min_players < 2 { 2 } else { min_players };
+        let effective_max = if max_players < effective_min { effective_min } else { max_players };
+
         let tournament = TournamentPrizePool {
             tournament_id: tournament_id.clone(),
             players: Vec::new(&env),
             buy_in_amount,
             total_pool: 0,
-            prize_distribution,
+            prize_distribution: Vec::new(&env),
             final_rankings: Vec::new(&env),
             status: TournamentStatus::Open,
             created_at: env.ledger().timestamp(),
             token,
+            max_players: effective_max,
+            min_players: effective_min,
+            registration_deadline,
         };
 
         env.storage().persistent().set(&tournament_id, &tournament);
         Self::bump_entry_ttl(&env, &tournament_id);
+
+        env.events().publish(
+            (Symbol::new(&env, "tourn_crt"), tournament_id),
+            (buy_in_amount, effective_max, effective_min),
+        );
+    }
+
+    /// Convenience helper to create a tournament with default min_players and deadline.
+    pub fn create_tournament_simple(
+        env: Env,
+        tournament_id: String,
+        buy_in_amount: i128,
+        max_players: u32,
+        token: Address,
+    ) {
+        Self::create_tournament(
+            env.clone(),
+            tournament_id,
+            buy_in_amount,
+            max_players,
+            2,
+            0,
+            token,
+        );
     }
 
     /// Joins an open tournament.
@@ -2560,6 +2615,15 @@ impl ChessterEscrow {
             panic_with_error!(&env, EscrowError::InvalidTournament);
         }
 
+        let now = env.ledger().timestamp();
+        if tournament.registration_deadline > 0 && now > tournament.registration_deadline {
+            panic_with_error!(&env, EscrowError::TournamentNotRefundable);
+        }
+
+        if tournament.max_players > 0 && (tournament.players.len() as u32) >= tournament.max_players {
+            panic_with_error!(&env, EscrowError::TournamentFull);
+        }
+
         if tournament.players.contains(&player) {
             panic_with_error!(&env, EscrowError::AlreadyJoined);
         }
@@ -2572,20 +2636,38 @@ impl ChessterEscrow {
             &tournament.buy_in_amount,
         );
 
-        tournament.players.push_back(player);
-        tournament.total_pool += tournament.buy_in_amount;
+        tournament.players.push_back(player.clone());
+        tournament.total_pool = tournament.total_pool.checked_add(tournament.buy_in_amount).unwrap();
+
+        Self::add_locked(&env, &tournament.token, tournament.buy_in_amount);
+
+        if tournament.max_players > 0 && (tournament.players.len() as u32) == tournament.max_players {
+            tournament.status = TournamentStatus::Active;
+        }
 
         env.storage().persistent().set(&tournament_id, &tournament);
         Self::bump_entry_ttl(&env, &tournament_id);
+        Self::assert_balance_invariant(&env, &tournament.token);
+
+        env.events().publish(
+            (Symbol::new(&env, "tourn_jn"), tournament_id, player),
+            tournament.total_pool,
+        );
     }
 
-    /// Completes tournament with final rankings and distributes prize payouts.
+    /// Completes tournament with multi-winner payout distribution and protocol rake deduction.
     ///
     /// # Arguments
     /// * `env` - Environment reference.
     /// * `tournament_id` - Unique tournament identifier.
-    /// * `final_rankings` - Vector of ranked player addresses.
-    pub fn complete_tournament(env: Env, tournament_id: String, final_rankings: Vec<Address>) {
+    /// * `winners` - Vector of ranked winning player addresses.
+    /// * `payout_bps` - Vector of payout basis points corresponding to each winner (must sum to 10,000).
+    pub fn complete_tournament(
+        env: Env,
+        tournament_id: String,
+        winners: Vec<Address>,
+        payout_bps: Vec<u32>,
+    ) {
         let _guard = ReentrancyGuard::new(&env);
         let coordinator = Self::get_coordinator(env.clone());
         coordinator.require_auth();
@@ -2597,30 +2679,167 @@ impl ChessterEscrow {
             .unwrap_or_else(|| panic_with_error!(&env, EscrowError::InvalidTournament));
         Self::bump_entry_ttl(&env, &tournament_id);
 
-        if tournament.status != TournamentStatus::Open {
+        if tournament.status != TournamentStatus::Open && tournament.status != TournamentStatus::Active {
             panic_with_error!(&env, EscrowError::InvalidTournament);
         }
 
-        if final_rankings.len() != tournament.players.len() {
+        if winners.is_empty() || winners.len() != payout_bps.len() {
             panic_with_error!(&env, EscrowError::InvalidTournament);
         }
+
+        let mut total_bps: u32 = 0;
+        for bps in payout_bps.iter() {
+            total_bps = total_bps
+                .checked_add(bps)
+                .unwrap_or_else(|| panic_with_error!(&env, EscrowError::InvalidPayoutDistribution));
+        }
+        if total_bps != 10_000 {
+            panic_with_error!(&env, EscrowError::InvalidPayoutDistribution);
+        }
+
+        let fee_bps = Self::get_fee_bps(env.clone());
+        let rake = (tournament.total_pool.checked_mul(fee_bps as i128).unwrap())
+            .checked_div(10_000)
+            .unwrap_or(0);
+        let net_pool = tournament.total_pool.checked_sub(rake).unwrap();
 
         let token_client = token::Client::new(&env, &tournament.token);
+        if rake > 0 {
+            let recipient = Self::get_treasury_vault(env.clone()).unwrap_or_else(|| coordinator.clone());
+            token_client.transfer(&env.current_contract_address(), &recipient, &rake);
+        }
 
-        for (i, winner) in final_rankings.iter().enumerate() {
-            if (i as u32) < tournament.prize_distribution.len() {
-                let prize = tournament.prize_distribution.get(i as u32).unwrap_or(0);
-                if prize > 0 {
-                    token_client.transfer(&env.current_contract_address(), &winner, &prize);
-                }
+        let mut total_distributed: i128 = 0;
+        for i in 0..winners.len() {
+            let winner = winners.get(i).unwrap();
+            let bps = payout_bps.get(i).unwrap();
+            let payout = if i == winners.len() - 1 {
+                net_pool.checked_sub(total_distributed).unwrap()
+            } else {
+                (net_pool.checked_mul(bps as i128).unwrap())
+                    .checked_div(10_000)
+                    .unwrap()
+            };
+            if payout > 0 {
+                token_client.transfer(&env.current_contract_address(), &winner, &payout);
+                total_distributed = total_distributed.checked_add(payout).unwrap();
             }
         }
 
+        let total_out = total_distributed.checked_add(rake).unwrap();
+        if total_out != tournament.total_pool {
+            panic_with_error!(&env, EscrowError::InvariantViolated);
+        }
+
+        Self::sub_locked(&env, &tournament.token, tournament.total_pool);
+        Self::assert_balance_invariant(&env, &tournament.token);
+
         tournament.status = TournamentStatus::Completed;
-        tournament.final_rankings = final_rankings;
+        tournament.final_rankings = winners.clone();
 
         env.storage().persistent().set(&tournament_id, &tournament);
         Self::bump_entry_ttl(&env, &tournament_id);
+
+        env.events().publish(
+            (Symbol::new(&env, "tourn_cmp"), tournament_id),
+            (winners, tournament.total_pool, rake),
+        );
+    }
+
+    /// Cancels tournament and opens the refund window.
+    ///
+    /// Can be invoked by coordinator at any time prior to completion, or by any participant
+    /// if the registration deadline has expired without meeting the minimum player quorum.
+    pub fn cancel_tournament(env: Env, tournament_id: String) {
+        let mut tournament: TournamentPrizePool = env
+            .storage()
+            .persistent()
+            .get(&tournament_id)
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::InvalidTournament));
+        Self::bump_entry_ttl(&env, &tournament_id);
+
+        if tournament.status == TournamentStatus::Completed || tournament.status == TournamentStatus::Cancelled {
+            panic_with_error!(&env, EscrowError::InvalidTournament);
+        }
+
+        let now = env.ledger().timestamp();
+        let quorum_failed = tournament.registration_deadline > 0
+            && now > tournament.registration_deadline
+            && (tournament.players.len() as u32) < tournament.min_players;
+
+        if !quorum_failed {
+            let coordinator = Self::get_coordinator(env.clone());
+            coordinator.require_auth();
+        }
+
+        tournament.status = TournamentStatus::Cancelled;
+        env.storage().persistent().set(&tournament_id, &tournament);
+        Self::bump_entry_ttl(&env, &tournament_id);
+
+        env.events().publish(
+            (Symbol::new(&env, "tourn_can"), tournament_id),
+            tournament.players.len(),
+        );
+    }
+
+    /// Claims a full refund of entry fee for a cancelled tournament or expired quorum.
+    pub fn claim_tournament_refund(env: Env, tournament_id: String, player: Address) {
+        player.require_auth();
+
+        let mut tournament: TournamentPrizePool = env
+            .storage()
+            .persistent()
+            .get(&tournament_id)
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::InvalidTournament));
+        Self::bump_entry_ttl(&env, &tournament_id);
+
+        let now = env.ledger().timestamp();
+        let quorum_failed = tournament.registration_deadline > 0
+            && now > tournament.registration_deadline
+            && (tournament.players.len() as u32) < tournament.min_players;
+
+        if tournament.status != TournamentStatus::Cancelled && !quorum_failed {
+            panic_with_error!(&env, EscrowError::TournamentNotRefundable);
+        }
+
+        if tournament.status != TournamentStatus::Cancelled {
+            tournament.status = TournamentStatus::Cancelled;
+            env.storage().persistent().set(&tournament_id, &tournament);
+            Self::bump_entry_ttl(&env, &tournament_id);
+        }
+
+        if !tournament.players.contains(&player) {
+            panic_with_error!(&env, EscrowError::Unauthorized);
+        }
+
+        let refund_key = (Symbol::new(&env, "ref_clm"), tournament_id.clone(), player.clone());
+        if env.storage().persistent().has(&refund_key) {
+            panic_with_error!(&env, EscrowError::AlreadyRefunded);
+        }
+
+        env.storage().persistent().set(&refund_key, &true);
+        Self::bump_entry_ttl(&env, &refund_key);
+
+        let token_client = token::Client::new(&env, &tournament.token);
+        token_client.transfer(
+            &env.current_contract_address(),
+            &player,
+            &tournament.buy_in_amount,
+        );
+
+        Self::sub_locked(&env, &tournament.token, tournament.buy_in_amount);
+        Self::assert_balance_invariant(&env, &tournament.token);
+
+        env.events().publish(
+            (Symbol::new(&env, "tourn_ref"), tournament_id, player),
+            tournament.buy_in_amount,
+        );
+    }
+
+    /// Returns whether a player has claimed their refund for a tournament.
+    pub fn is_refund_claimed(env: Env, tournament_id: String, player: Address) -> bool {
+        let refund_key = (Symbol::new(&env, "ref_clm"), tournament_id, player);
+        env.storage().persistent().get(&refund_key).unwrap_or(false)
     }
 
     /// Retrieves tournament details.

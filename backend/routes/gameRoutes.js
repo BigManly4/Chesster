@@ -16,6 +16,7 @@ router.post('/games/:gameCode/draw/accept', gameController.acceptDraw);
 router.post('/games/:gameCode/undo/request', gameController.requestUndoMove);
 router.post('/games/:gameCode/undo/accept', gameController.acceptUndoMove);
 router.post('/games/:gameCode/undo/reject', gameController.rejectUndoMove);
+router.post('/games/:gameCode/end', gameController.endGame);
 router.get('/games/:gameCode/chat', gameController.getChatMessages);
 
 module.exports = router;

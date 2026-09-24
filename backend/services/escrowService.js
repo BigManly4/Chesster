@@ -357,6 +357,32 @@ async function resolveAsDraw(gameCode) {
 }
 
 /**
+ * Coordinator triggers final tournament prize pool distribution.
+ *
+ * @param {string} tournamentId - Tournament unique identifier
+ * @param {Array<string>} winners - Array of winner addresses in order of ranking
+ * @param {Array<number>} [payoutBps=[10000]] - Array of payout basis points summing to 10000
+ */
+async function completeTournament(tournamentId, winners, payoutBps = [10000]) {
+	if (!contract) throw new Error("Escrow contract not configured");
+	if (!coordinatorKeypair) throw new Error("Coordinator secret key not configured");
+
+	const winnersScVal = nativeToScVal(winners, { type: "vec" });
+	const payoutBpsScVal = nativeToScVal(payoutBps, { type: "vec" });
+
+	return submitWithRetry(
+		() =>
+			contract.call(
+				"complete_tournament",
+				nativeToScVal(tournamentId, { type: "string" }),
+				winnersScVal,
+				payoutBpsScVal,
+			),
+		{ label: `complete_tournament(${tournamentId})` },
+	);
+}
+
+/**
  * Stellar Horizon Transaction Indexer for Real-Time Deposit Verification
  * Queries Horizon API to verify on-chain escrow deposit transactions
  */
@@ -614,6 +640,7 @@ module.exports = {
 	resolveMatch,
 	resolveWithWinner,
 	resolveAsDraw,
+	completeTournament,
 	forfeitMatch,
 	refundUnresolvedMatch,
 	getMatch,

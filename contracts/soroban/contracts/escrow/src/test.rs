@@ -492,11 +492,10 @@ fn test_tournament_create_and_join() {
     client.add_supported_token(&token.address);
 
     let tournament_id = String::from_str(&env, "TOURNAMENT1");
-    let prize_dist = vec![&env, 150, 50];
 
     approve(&env, &token, &player1, &contract_id, 1000);
     approve(&env, &token, &player2, &contract_id, 1000);
-    client.create_tournament(&tournament_id, &100, &prize_dist, &token.address);
+    client.create_tournament(&tournament_id, &100, &8, &2, &0, &token.address);
 
     client.join_tournament(&tournament_id, &player1);
     client.join_tournament(&tournament_id, &player2);
@@ -527,21 +526,172 @@ fn test_tournament_complete() {
     client.add_supported_token(&token.address);
 
     let tournament_id = String::from_str(&env, "TOURNAMENT1");
-    let prize_dist = vec![&env, 150, 50];
 
     approve(&env, &token, &player1, &contract_id, 1000);
     approve(&env, &token, &player2, &contract_id, 1000);
-    client.create_tournament(&tournament_id, &100, &prize_dist, &token.address);
+    client.create_tournament(&tournament_id, &100, &8, &2, &0, &token.address);
     client.join_tournament(&tournament_id, &player1);
     client.join_tournament(&tournament_id, &player2);
 
-    let final_rankings = vec![&env, player1.clone(), player2.clone()];
-    client.complete_tournament(&tournament_id, &final_rankings);
+    let winners = vec![&env, player1.clone(), player2.clone()];
+    let payout_bps = vec![&env, 7000_u32, 3000_u32];
+    client.complete_tournament(&tournament_id, &winners, &payout_bps);
 
     let tournament = client.get_tournament(&tournament_id);
     assert_eq!(tournament.status, TournamentStatus::Completed);
-    assert_eq!(token.balance(&player1), 1050);
-    assert_eq!(token.balance(&player2), 950);
+    // Total pool 200. Fee 500 bps (5%) = 10 tokens to coordinator. Net pool = 190.
+    // 1st place: 190 * 7000 / 10000 = 133. Player 1: 1000 - 100 + 133 = 1033.
+    // 2nd place: 190 - 133 = 57. Player 2: 1000 - 100 + 57 = 957.
+    assert_eq!(token.balance(&player1), 1033);
+    assert_eq!(token.balance(&player2), 957);
+    assert_eq!(token.balance(&coordinator), 10);
+}
+
+#[test]
+fn test_tournament_prize_pool_lifecycle() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let coordinator = Address::generate(&env);
+    let p1 = Address::generate(&env);
+    let p2 = Address::generate(&env);
+    let p3 = Address::generate(&env);
+    let p4 = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+
+    let (token, token_admin_client) = create_token_contract(&env, &token_admin);
+    token_admin_client.mint(&p1, &1000);
+    token_admin_client.mint(&p2, &1000);
+    token_admin_client.mint(&p3, &1000);
+    token_admin_client.mint(&p4, &1000);
+
+    let contract_id = env.register(ChessterEscrow, ());
+    let client = ChessterEscrowClient::new(&env, &contract_id);
+
+    client.init(&coordinator, &250); // 2.5% platform fee
+    client.add_supported_token(&token.address);
+
+    let tournament_id = String::from_str(&env, "TOURN_MULTI_WINNER");
+
+    approve(&env, &token, &p1, &contract_id, 1000);
+    approve(&env, &token, &p2, &contract_id, 1000);
+    approve(&env, &token, &p3, &contract_id, 1000);
+    approve(&env, &token, &p4, &contract_id, 1000);
+
+    client.create_tournament(&tournament_id, &200, &4, &2, &1000, &token.address);
+
+    client.join_tournament(&tournament_id, &p1);
+    client.join_tournament(&tournament_id, &p2);
+    client.join_tournament(&tournament_id, &p3);
+    client.join_tournament(&tournament_id, &p4);
+
+    let t = client.get_tournament(&tournament_id);
+    assert_eq!(t.total_pool, 800);
+    assert_eq!(t.status, TournamentStatus::Active);
+    assert_eq!(client.get_escrowed_balance(&token.address), 800);
+
+    // Invalid payout BPS sum check (9000 != 10000)
+    let bad_bps = vec![&env, 5000_u32, 3000_u32, 1000_u32];
+    let bad_winners = vec![&env, p1.clone(), p2.clone(), p3.clone()];
+    let res = client.try_complete_tournament(&tournament_id, &bad_winners, &bad_bps);
+    assert!(res.is_err());
+
+    // Valid distribution: 50%, 30%, 20%
+    let winners = vec![&env, p1.clone(), p2.clone(), p3.clone()];
+    let payout_bps = vec![&env, 5000_u32, 3000_u32, 2000_u32];
+    client.complete_tournament(&tournament_id, &winners, &payout_bps);
+
+    let completed = client.get_tournament(&tournament_id);
+    assert_eq!(completed.status, TournamentStatus::Completed);
+    // Total pool: 800. Rake: 2.5% = 20. Net pool = 780.
+    // P1: 50% = 390 -> 1000 - 200 + 390 = 1190.
+    // P2: 30% = 234 -> 1000 - 200 + 234 = 1034.
+    // P3: 20% = 156 -> 1000 - 200 + 156 = 956.
+    // P4: 0%  = 0   -> 1000 - 200 = 800.
+    // Coordinator: 20.
+    assert_eq!(token.balance(&p1), 1190);
+    assert_eq!(token.balance(&p2), 1034);
+    assert_eq!(token.balance(&p3), 956);
+    assert_eq!(token.balance(&p4), 800);
+    assert_eq!(token.balance(&coordinator), 20);
+    assert_eq!(client.get_escrowed_balance(&token.address), 0);
+    assert_eq!(token.balance(&contract_id), 0);
+}
+
+#[test]
+fn test_tournament_refund_workflow() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let coordinator = Address::generate(&env);
+    let p1 = Address::generate(&env);
+    let p2 = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+
+    let (token, token_admin_client) = create_token_contract(&env, &token_admin);
+    token_admin_client.mint(&p1, &1000);
+    token_admin_client.mint(&p2, &1000);
+
+    let contract_id = env.register(ChessterEscrow, ());
+    let client = ChessterEscrowClient::new(&env, &contract_id);
+    client.init(&coordinator, &500);
+    client.add_supported_token(&token.address);
+
+    // Scenario 1: Coordinator cancels tournament
+    let tourn_cancel = String::from_str(&env, "TOURN_CANCEL");
+    approve(&env, &token, &p1, &contract_id, 1000);
+    client.create_tournament(&tourn_cancel, &200, &4, &2, &1000, &token.address);
+    client.join_tournament(&tourn_cancel, &p1);
+    assert_eq!(token.balance(&p1), 800);
+    assert_eq!(client.get_escrowed_balance(&token.address), 200);
+
+    client.cancel_tournament(&tourn_cancel);
+    let t = client.get_tournament(&tourn_cancel);
+    assert_eq!(t.status, TournamentStatus::Cancelled);
+
+    // Non-participant cannot claim
+    let err_unauth = client.try_claim_tournament_refund(&tourn_cancel, &p2);
+    assert!(err_unauth.is_err());
+
+    // P1 claims refund
+    assert!(!client.is_refund_claimed(&tourn_cancel, &p1));
+    client.claim_tournament_refund(&tourn_cancel, &p1);
+    assert_eq!(token.balance(&p1), 1000);
+    assert!(client.is_refund_claimed(&tourn_cancel, &p1));
+    assert_eq!(client.get_escrowed_balance(&token.address), 0);
+
+    // Double refund fails
+    let err_double = client.try_claim_tournament_refund(&tourn_cancel, &p1);
+    assert!(err_double.is_err());
+
+    // Scenario 2: Quorum failure triggers self-service refund past deadline
+    env.ledger().set_timestamp(100);
+    let tourn_quorum = String::from_str(&env, "TOURN_QUORUM");
+    approve(&env, &token, &p2, &contract_id, 1000);
+    client.create_tournament(&tourn_quorum, &150, &4, &3, &500, &token.address);
+    client.join_tournament(&tourn_quorum, &p1);
+    client.join_tournament(&tourn_quorum, &p2);
+
+    assert_eq!(token.balance(&p1), 850);
+    assert_eq!(token.balance(&p2), 850);
+    assert_eq!(client.get_escrowed_balance(&token.address), 300);
+
+    // Prior to deadline, refund cannot be claimed without cancellation
+    let err_early = client.try_claim_tournament_refund(&tourn_quorum, &p1);
+    assert!(err_early.is_err());
+
+    // Advance timestamp past deadline
+    env.ledger().set_timestamp(600);
+
+    // Self-service refund succeeds and sets status to Cancelled
+    client.claim_tournament_refund(&tourn_quorum, &p1);
+    assert_eq!(token.balance(&p1), 1000);
+    assert_eq!(client.get_tournament(&tourn_quorum).status, TournamentStatus::Cancelled);
+
+    client.claim_tournament_refund(&tourn_quorum, &p2);
+    assert_eq!(token.balance(&p2), 1000);
+    assert_eq!(client.get_escrowed_balance(&token.address), 0);
+    assert_eq!(token.balance(&contract_id), 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -1520,8 +1670,7 @@ fn test_pause_blocks_create_tournament() {
     client.pause();
 
     let tournament_id = String::from_str(&env, "TOURN_PAUSED");
-    let prize_dist = vec![&env, 500_i128, 300_i128, 200_i128];
-    let result = client.try_create_tournament(&tournament_id, &100, &prize_dist, &token.address);
+    let result = client.try_create_tournament(&tournament_id, &100, &8, &2, &0, &token.address);
     assert!(result.is_err());
 }
 
@@ -1543,9 +1692,8 @@ fn test_pause_blocks_join_tournament() {
     client.add_whitelisted_token(&token.address);
 
     let tournament_id = String::from_str(&env, "TOURN_JOIN_PAUSED");
-    let prize_dist = vec![&env, 500_i128];
     // Create tournament while unpaused
-    client.create_tournament(&tournament_id, &100, &prize_dist, &token.address);
+    client.create_tournament(&tournament_id, &100, &8, &2, &0, &token.address);
 
     // Pause before anyone joins
     client.pause();
