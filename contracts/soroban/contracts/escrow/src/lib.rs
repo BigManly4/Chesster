@@ -1,7 +1,7 @@
 #![no_std]
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, token,
-    Address, BytesN, Env, IntoVal, Map, String, Symbol, Val, Vec,
+    xdr::ToXdr, Address, BytesN, Env, IntoVal, Map, String, Symbol, Val, Vec,
 };
 
 /// Remaining TTL (in ledgers) below which escrow storage entries are auto-extended (~6 days).
@@ -116,6 +116,8 @@ pub enum EscrowError {
     InvalidPayoutDistribution = 41,
     /// Tournament has reached its maximum player capacity.
     TournamentFull = 42,
+    /// Nonce has already been used for signature verification.
+    NonceAlreadyUsed = 43,
 }
 
 /// Lifecycle status of a chess match escrow.
@@ -486,6 +488,16 @@ fn release_reentrancy(env: &Env) {
         .set(&symbol_short!("reentr"), &false);
 }
 
+/// Payload for resolving a match via Ed25519 signature.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MatchResolutionPayload {
+    pub match_id: String,
+    pub winner: Option<Address>,
+    pub moves_hash: String,
+    pub nonce: u64,
+}
+
 /// Chesster Escrow Smart Contract instance.
 #[contract]
 pub struct ChessterEscrow;
@@ -512,6 +524,23 @@ impl ChessterEscrow {
         env.storage()
             .instance()
             .set(&Symbol::new(&env, "signers"), &signers);
+    }
+
+    /// Sets the coordinator's Ed25519 public key for signature verification.
+    pub fn set_coordinator_pubkey(env: Env, pubkey: BytesN<32>) {
+        let coordinator = Self::get_coordinator(env.clone());
+        coordinator.require_auth();
+        env.storage()
+            .instance()
+            .set(&symbol_short!("pubkey"), &pubkey);
+    }
+
+    /// Retrieves the registered coordinator Ed25519 public key.
+    pub fn get_coordinator_pubkey(env: Env) -> BytesN<32> {
+        env.storage()
+            .instance()
+            .get(&symbol_short!("pubkey"))
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::NotInitialized))
     }
 
     /// Pauses the contract, blocking new match and tournament creation (coordinator only).
@@ -1946,6 +1975,54 @@ impl ChessterEscrow {
     pub fn get_draw_status(env: Env, game_code: String) -> (bool, bool) {
         let m = Self::load_match(&env, &game_code);
         (m.draw_requested_player1, m.draw_requested_player2)
+    }
+
+    /// Resolves a match using an Ed25519 signature from the coordinator.
+    pub fn resolve_match_with_signature(
+        env: Env,
+        payload: MatchResolutionPayload,
+        signature: BytesN<64>,
+    ) {
+        let _guard = ReentrancyGuard::new(&env);
+
+        let nonce_key = (symbol_short!("sig_non"), payload.nonce);
+        if env.storage().persistent().has(&nonce_key) {
+            panic_with_error!(&env, EscrowError::NonceAlreadyUsed);
+        }
+
+        let coordinator_pubkey = Self::get_coordinator_pubkey(env.clone());
+        let payload_bytes = payload.clone().to_xdr(&env);
+
+        env.crypto()
+            .ed25519_verify(&coordinator_pubkey, &payload_bytes, &signature);
+
+        env.storage().persistent().set(&nonce_key, &true);
+
+        Self::ensure_dispute_not_locked(&env, &payload.match_id);
+
+        let mut m = Self::load_match(&env, &payload.match_id);
+        if m.status != MatchStatus::Active {
+            panic_with_error!(&env, EscrowError::MatchNotActive);
+        }
+
+        let coordinator = Self::get_coordinator(env.clone());
+        let admin_fee = Self::settle_match(
+            &env,
+            &coordinator,
+            &payload.match_id,
+            &mut m,
+            payload.winner.clone(),
+        );
+
+        env.events().publish(
+            (symbol_short!("resolved"), payload.match_id.clone()),
+            MatchResolvedEvent {
+                game_code: payload.match_id,
+                winner: payload.winner,
+                admin_fee,
+                timestamp: env.ledger().timestamp(),
+            },
+        );
     }
 
     /// Coordinator resolves active match, distributing payouts and fee discounts (Issues #35 & #36).
