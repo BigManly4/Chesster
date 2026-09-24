@@ -523,6 +523,7 @@ fn test_tournament_complete() {
     let client = ChessterEscrowClient::new(&env, &contract_id);
 
     client.init(&coordinator, &500);
+    client.set_tournament_fee_bps(&500);
     client.add_supported_token(&token.address);
 
     let tournament_id = String::from_str(&env, "TOURNAMENT1");
@@ -569,6 +570,7 @@ fn test_tournament_prize_pool_lifecycle() {
     let client = ChessterEscrowClient::new(&env, &contract_id);
 
     client.init(&coordinator, &250); // 2.5% platform fee
+    client.set_tournament_fee_bps(&250);
     client.add_supported_token(&token.address);
 
     let tournament_id = String::from_str(&env, "TOURN_MULTI_WINNER");
@@ -694,6 +696,153 @@ fn test_tournament_refund_workflow() {
     client.claim_tournament_refund(&tourn_quorum, &p2);
     assert_eq!(token.balance(&p2), 1000);
     assert_eq!(client.get_escrowed_balance(&token.address), 0);
+    assert_eq!(token.balance(&contract_id), 0);
+}
+
+// ---------------------------------------------------------------------------
+// Issue #221 — Tournament Tiered Rake & Treasury Protocol Fee Deduction
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_tournament_fee_deduction() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let coordinator = Address::generate(&env);
+    let treasury_vault = Address::generate(&env);
+    let player1 = Address::generate(&env);
+    let player2 = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+
+    let (token, token_admin_client) = create_token_contract(&env, &token_admin);
+    token_admin_client.mint(&player1, &1000);
+    token_admin_client.mint(&player2, &1000);
+
+    let contract_id = env.register(ChessterEscrow, ());
+    let client = ChessterEscrowClient::new(&env, &contract_id);
+
+    client.init(&coordinator, &500);
+    client.add_supported_token(&token.address);
+    client.set_treasury_vault(&treasury_vault);
+
+    // Initial fee defaults to 0
+    assert_eq!(client.get_tournament_fee_bps(), 0);
+
+    // Verify calculate_tournament_rake pure logic
+    let (net, rake) = client.calculate_tournament_rake(&1000, &500);
+    assert_eq!(rake, 50);
+    assert_eq!(net, 950);
+
+    // Set tournament fee to 500 BPS (5%)
+    client.set_tournament_fee_bps(&500);
+    assert_eq!(client.get_tournament_fee_bps(), 500);
+
+    let tournament_id = String::from_str(&env, "TOURN_FEE_1");
+    let payout_bps = vec![&env, 7500_u32, 2500_u32];
+
+    approve(&env, &token, &player1, &contract_id, 1000);
+    approve(&env, &token, &player2, &contract_id, 1000);
+    client.create_tournament(&tournament_id, &100, &8, &2, &0, &token.address);
+    client.join_tournament(&tournament_id, &player1);
+    client.join_tournament(&tournament_id, &player2);
+
+    let tournament_before = client.get_tournament(&tournament_id);
+    assert_eq!(tournament_before.total_pool, 200);
+
+    let final_rankings = vec![&env, player1.clone(), player2.clone()];
+    client.complete_tournament(&tournament_id, &final_rankings, &payout_bps);
+
+    // total_pool = 200, rake = 200 * 500 / 10000 = 10
+    // net_prize_pool = 190
+    // w1 share = (150 * 190) / 200 = 142
+    // w2 share = 190 - 142 = 48
+    // treasury balance = 10 (rake)
+    assert_eq!(token.balance(&treasury_vault), 10);
+    // player1: spent 100 (balance 900) + received 142 = 1042
+    assert_eq!(token.balance(&player1), 1042);
+    // player2: spent 100 (balance 900) + received 48 = 948
+    assert_eq!(token.balance(&player2), 948);
+
+    // Verify zero token leakage or dust accumulation in the escrow contract balance
+    assert_eq!(token.balance(&contract_id), 0);
+    // Verify conservation: 10 + 142 + 48 == 200
+    assert_eq!(
+        10 + (token.balance(&player1) - 900) + (token.balance(&player2) - 900),
+        200
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #3)")]
+fn test_set_tournament_fee_bps_rejects_above_cap() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let coordinator = Address::generate(&env);
+    let contract_id = env.register(ChessterEscrow, ());
+    let client = ChessterEscrowClient::new(&env, &contract_id);
+    client.init(&coordinator, &500);
+
+    // Attempting to set fee > 500 BPS must panic with InvalidWager (error #3)
+    client.set_tournament_fee_bps(&501);
+}
+
+// ---------------------------------------------------------------------------
+// Issue #222 — Tournament Stage Checkpoints and Disqualification Slashing
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_disqualification_and_redistribution() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let coordinator = Address::generate(&env);
+    let treasury_vault = Address::generate(&env);
+    let player1 = Address::generate(&env);
+    let player2 = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+
+    let (token, token_admin_client) = create_token_contract(&env, &token_admin);
+    token_admin_client.mint(&player1, &1000);
+    token_admin_client.mint(&player2, &1000);
+
+    let contract_id = env.register(ChessterEscrow, ());
+    let client = ChessterEscrowClient::new(&env, &contract_id);
+
+    client.init(&coordinator, &500);
+    client.add_supported_token(&token.address);
+    client.set_treasury_vault(&treasury_vault);
+
+    let tournament_id = String::from_str(&env, "TOURN_DQ_1");
+    let payout_bps = vec![&env, 7500_u32, 2500_u32];
+
+    approve(&env, &token, &player1, &contract_id, 1000);
+    approve(&env, &token, &player2, &contract_id, 1000);
+    client.create_tournament(&tournament_id, &100, &8, &2, &0, &token.address);
+    client.join_tournament(&tournament_id, &player1);
+    client.join_tournament(&tournament_id, &player2);
+
+    // Record stage checkpoint
+    client.record_stage_checkpoint(&tournament_id, &2);
+    let tournament_stg = client.get_tournament(&tournament_id);
+    assert_eq!(tournament_stg.stage, 2);
+
+    // Disqualify player1 (cheating / forfeit reason code 99)
+    client.disqualify_participant(&tournament_id, &player1, &99);
+    let tournament_dq = client.get_tournament(&tournament_id);
+    assert!(tournament_dq.disqualified.get(player1.clone()).unwrap());
+
+    // Complete tournament with player1 ranked 1st and player2 ranked 2nd
+    let final_rankings = vec![&env, player1.clone(), player2.clone()];
+    client.complete_tournament(&tournament_id, &final_rankings, &payout_bps);
+
+    // Player1 was disqualified: prize (150) must NOT be received by player1,
+    // but slashed and transferred directly to treasury
+    assert_eq!(token.balance(&player1), 900); // Spent 100 on buy-in, receives 0 prize
+    assert_eq!(token.balance(&player2), 950); // Spent 100 on buy-in, receives 50 prize
+    assert_eq!(token.balance(&treasury_vault), 150); // Slashed prize routed to treasury
+
+    // Escrow contract balance must be strictly 0 (no dust, complete conservation)
     assert_eq!(token.balance(&contract_id), 0);
 }
 

@@ -1,7 +1,7 @@
 #![no_std]
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, token,
-    Address, BytesN, Env, IntoVal, String, Symbol, Val, Vec,
+    Address, BytesN, Env, IntoVal, Map, String, Symbol, Val, Vec,
 };
 
 /// Remaining TTL (in ledgers) below which escrow storage entries are auto-extended (~6 days).
@@ -20,6 +20,10 @@ pub const MATCH_EXPIRATION_SECS: u64 = 3_600;
 pub const DEFAULT_MIN_WAGER: i128 = 1;
 /// Default maximum allowable wager amount (maximum positive i128).
 pub const DEFAULT_MAX_WAGER: i128 = i128::MAX;
+/// Maximum allowable tournament fee in basis points (500 bps = 5%) (Issue #221).
+pub const MAX_TOURNAMENT_FEE_BPS: u32 = 500;
+/// Basis points denominator (10,000 bps = 100%) (Issue #221).
+pub const BPS_DENOMINATOR: i128 = 10_000;
 
 /// Errors returned by the Chesster Escrow smart contract.
 #[contracterror]
@@ -196,6 +200,10 @@ pub struct TournamentPrizePool {
     pub min_players: u32,
     /// Registration deadline ledger timestamp.
     pub registration_deadline: u64,
+    /// Current tournament stage or round checkpoint (Issue #222).
+    pub stage: u32,
+    /// Map of disqualified player addresses (Issue #222).
+    pub disqualified: Map<Address, bool>,
 }
 
 pub type Tournament = TournamentPrizePool;
@@ -747,6 +755,54 @@ impl ChessterEscrow {
     /// * `Option<Address>` - Treasury vault address if set.
     pub fn get_treasury_vault(env: Env) -> Option<Address> {
         env.storage().instance().get(&Symbol::new(&env, "trsy_vlt"))
+    }
+
+    /// Configures protocol tournament rake fee basis points (Issue #221).
+    /// Hard-capped at 500 basis points (5%).
+    ///
+    /// # Arguments
+    /// * `env` - Environment reference.
+    /// * `fee_bps` - Tournament fee basis points (max 500 = 5%).
+    pub fn set_tournament_fee_bps(env: Env, fee_bps: u32) {
+        let coordinator = Self::get_coordinator(env.clone());
+        coordinator.require_auth();
+        if fee_bps > MAX_TOURNAMENT_FEE_BPS {
+            panic_with_error!(&env, EscrowError::InvalidWager);
+        }
+        let key = Symbol::new(&env, "trn_fee");
+        env.storage().persistent().set(&key, &fee_bps);
+        Self::bump_entry_ttl(&env, &key);
+        env.storage().instance().set(&key, &fee_bps);
+    }
+
+    /// Retrieves configured tournament fee basis points (Issue #221).
+    ///
+    /// # Arguments
+    /// * `env` - Environment reference.
+    ///
+    /// # Returns
+    /// * `u32` - Tournament fee basis points. Defaults to 0.
+    pub fn get_tournament_fee_bps(env: Env) -> u32 {
+        let key = Symbol::new(&env, "trn_fee");
+        if let Some(bps) = env.storage().persistent().get(&key) {
+            bps
+        } else {
+            env.storage().instance().get(&key).unwrap_or(0)
+        }
+    }
+
+    /// Calculates net tournament prize pool and protocol rake fee (Issue #221).
+    ///
+    /// # Arguments
+    /// * `total_pool` - Total accumulated tournament prize pool.
+    /// * `fee_bps` - Fee basis points.
+    ///
+    /// # Returns
+    /// * `(i128, i128)` - (net_prize, rake).
+    pub fn calculate_tournament_rake(total_pool: i128, fee_bps: u32) -> (i128, i128) {
+        let rake = (total_pool * fee_bps as i128) / BPS_DENOMINATOR;
+        let net_prize = total_pool - rake;
+        (net_prize, rake)
     }
 
     /// Retrieves current contract treasury balance for specified token.
@@ -2565,6 +2621,8 @@ impl ChessterEscrow {
             max_players: effective_max,
             min_players: effective_min,
             registration_deadline,
+            stage: 0,
+            disqualified: Map::new(&env),
         };
 
         env.storage().persistent().set(&tournament_id, &tournament);
@@ -2663,6 +2721,7 @@ impl ChessterEscrow {
     }
 
     /// Completes tournament with multi-winner payout distribution and protocol rake deduction.
+    /// Deducts protocol rake (Issue #221) and slashes prizes of disqualified participants to treasury (Issue #222).
     ///
     /// # Arguments
     /// * `env` - Environment reference.
@@ -2706,33 +2765,41 @@ impl ChessterEscrow {
             panic_with_error!(&env, EscrowError::InvalidPayoutDistribution);
         }
 
-        let fee_bps = Self::get_fee_bps(env.clone());
-        let rake = (tournament.total_pool.checked_mul(fee_bps as i128).unwrap())
-            .checked_div(10_000)
-            .unwrap_or(0);
-        let net_pool = tournament.total_pool.checked_sub(rake).unwrap();
+        let fee_recipient =
+            Self::get_treasury_vault(env.clone()).unwrap_or_else(|| coordinator.clone());
+
+        // Calculate and deduct tournament rake fee (Issue #221)
+        let fee_bps = Self::get_tournament_fee_bps(env.clone());
+        let (net_pool, rake) = Self::calculate_tournament_rake(tournament.total_pool, fee_bps);
 
         let token_client = token::Client::new(&env, &tournament.token);
         if rake > 0 {
-            let recipient =
-                Self::get_treasury_vault(env.clone()).unwrap_or_else(|| coordinator.clone());
-            token_client.transfer(&env.current_contract_address(), &recipient, &rake);
+            token_client.transfer(&env.current_contract_address(), &fee_recipient, &rake);
         }
 
         let mut total_distributed: i128 = 0;
-        for i in 0..winners.len() {
+        let num_winners = winners.len();
+        for i in 0..num_winners {
             let winner = winners.get(i).unwrap();
             let bps = payout_bps.get(i).unwrap();
-            let payout = if i == winners.len() - 1 {
+            let payout = if i == num_winners - 1 {
                 net_pool.checked_sub(total_distributed).unwrap()
             } else {
                 (net_pool.checked_mul(bps as i128).unwrap())
                     .checked_div(10_000)
                     .unwrap()
             };
+            total_distributed = total_distributed.checked_add(payout).unwrap();
+
             if payout > 0 {
-                token_client.transfer(&env.current_contract_address(), &winner, &payout);
-                total_distributed = total_distributed.checked_add(payout).unwrap();
+                let is_disqualified = tournament.disqualified.get(winner.clone()).unwrap_or(false);
+
+                if is_disqualified {
+                    // Slashed prize is routed directly to the treasury pool (Issue #222)
+                    token_client.transfer(&env.current_contract_address(), &fee_recipient, &payout);
+                } else {
+                    token_client.transfer(&env.current_contract_address(), &winner, &payout);
+                }
             }
         }
 
@@ -2856,6 +2923,62 @@ impl ChessterEscrow {
     pub fn is_refund_claimed(env: Env, tournament_id: String, player: Address) -> bool {
         let refund_key = (Symbol::new(&env, "ref_clm"), tournament_id, player);
         env.storage().persistent().get(&refund_key).unwrap_or(false)
+    }
+
+    /// Disqualifies a tournament participant (Issue #222).
+    ///
+    /// # Arguments
+    /// * `env` - Environment reference.
+    /// * `tournament_id` - Unique tournament identifier.
+    /// * `player` - Address of player to disqualify.
+    /// * `reason_code` - Reason code or hash for disqualification.
+    pub fn disqualify_participant(
+        env: Env,
+        tournament_id: String,
+        player: Address,
+        reason_code: u32,
+    ) {
+        let coordinator = Self::get_coordinator(env.clone());
+        coordinator.require_auth();
+
+        let mut tournament: TournamentPrizePool = env
+            .storage()
+            .persistent()
+            .get(&tournament_id)
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::InvalidTournament));
+
+        tournament.disqualified.set(player.clone(), true);
+        env.storage().persistent().set(&tournament_id, &tournament);
+        Self::bump_entry_ttl(&env, &tournament_id);
+
+        env.events().publish(
+            (symbol_short!("tourn_dq"), tournament_id),
+            (player, reason_code),
+        );
+    }
+
+    /// Records a tournament stage or round checkpoint (Issue #222).
+    ///
+    /// # Arguments
+    /// * `env` - Environment reference.
+    /// * `tournament_id` - Unique tournament identifier.
+    /// * `stage` - Checkpoint stage or round index.
+    pub fn record_stage_checkpoint(env: Env, tournament_id: String, stage: u32) {
+        let coordinator = Self::get_coordinator(env.clone());
+        coordinator.require_auth();
+
+        let mut tournament: TournamentPrizePool = env
+            .storage()
+            .persistent()
+            .get(&tournament_id)
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::InvalidTournament));
+
+        tournament.stage = stage;
+        env.storage().persistent().set(&tournament_id, &tournament);
+        Self::bump_entry_ttl(&env, &tournament_id);
+
+        env.events()
+            .publish((symbol_short!("tourn_stg"), tournament_id), stage);
     }
 
     /// Retrieves tournament details.

@@ -17,6 +17,8 @@ const supabase = require("./config/supabase");
 const logger = require("./utils/logger");
 const { errorHandler, installGlobalHandlers } = require("./middleware/errorHandler");
 const { moderateMessage } = require("./services/chatService");
+const swaggerUi = require("swagger-ui-express");
+const swaggerDocument = require("./docs/swagger.json");
 
 const app = express();
 const server = http.createServer(app);
@@ -42,6 +44,9 @@ app.use(
   }),
 );
 app.use(express.json());
+
+// Swagger API documentation (Issue #152)
+app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerDocument));
 
 // Mount routes
 app.use("/api", gameRoutes);
@@ -172,8 +177,11 @@ io.on("connection", (socket) => {
 
 app.set("io", io);
 timerService.init(io);
-cronService.start();
+if (require.main === module) {
+  cronService.start();
+  server.listen(PORT, "0.0.0.0", () => {
+    console.log(`Chesster backend running on port ${PORT}`);
+  });
+}
 
-server.listen(PORT, "0.0.0.0", () => {
-  console.log(`Chesster backend running on port ${PORT}`);
-});
+module.exports = { app, server };

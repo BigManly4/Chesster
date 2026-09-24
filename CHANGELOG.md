@@ -1,3 +1,10 @@
+# [1.13.0](https://github.com/Kaycee276/Chesster/compare/v1.12.0...v1.13.0) (2026-09-24)
+
+
+### Features
+
+* **backend,contracts:** match creation rate limiting, api docs, tournament rake, and disqualification slashing (closes [#151](https://github.com/Kaycee276/Chesster/issues/151), closes [#152](https://github.com/Kaycee276/Chesster/issues/152), closes [#221](https://github.com/Kaycee276/Chesster/issues/221), closes [#222](https://github.com/Kaycee276/Chesster/issues/222)) ([5ee7463](https://github.com/Kaycee276/Chesster/commit/5ee7463241d94d809d92824276a8c0e3cdaa4e6d))
+
 # [1.12.0](https://github.com/Kaycee276/Chesster/compare/v1.11.0...v1.12.0) (2026-09-24)
 
 
