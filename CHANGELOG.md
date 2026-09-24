@@ -1,3 +1,10 @@
+# [1.12.0](https://github.com/Kaycee276/Chesster/compare/v1.11.0...v1.12.0) (2026-09-24)
+
+
+### Features
+
+* **database:** add tournament bracket and participant tables migration ([c902d26](https://github.com/Kaycee276/Chesster/commit/c902d2646daed783abd8d19d3efc736f11f20e78))
+
 # [1.11.0](https://github.com/Kaycee276/Chesster/compare/v1.10.1...v1.11.0) (2026-09-23)
 
 
