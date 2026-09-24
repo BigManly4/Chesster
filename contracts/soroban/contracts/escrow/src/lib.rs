@@ -237,11 +237,13 @@ pub struct Dispute {
 /// Match resolution entry for batch resolution transactions.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BatchResolution {
-    /// Game code of match to resolve.
-    pub game_code: String,
+pub struct MatchResolution {
+    /// Unique identifier of match to resolve.
+    pub match_id: String,
     /// Winner address, or None for a draw.
     pub winner: Option<Address>,
+    /// Cryptographic hash of match moves.
+    pub moves_hash: String,
 }
 
 /// Full details and state representation of an escrow match.
@@ -2470,7 +2472,7 @@ impl ChessterEscrow {
     /// # Arguments
     /// * `env` - Environment reference.
     /// * `resolutions` - Vector of match resolutions.
-    pub fn batch_resolve_matches(env: Env, resolutions: Vec<BatchResolution>) {
+    pub fn batch_resolve_matches(env: Env, resolutions: Vec<MatchResolution>) {
         let _guard = ReentrancyGuard::new(&env);
         let coordinator = Self::get_coordinator(env.clone());
         coordinator.require_auth();
@@ -2481,12 +2483,12 @@ impl ChessterEscrow {
         }
 
         for resolution in resolutions.iter() {
-            Self::ensure_dispute_not_locked(&env, &resolution.game_code);
-            let mut m = Self::load_match(&env, &resolution.game_code);
+            Self::ensure_dispute_not_locked(&env, &resolution.match_id);
+            let mut m = Self::load_match(&env, &resolution.match_id);
             Self::settle_match(
                 &env,
                 &coordinator,
-                &resolution.game_code,
+                &resolution.match_id,
                 &mut m,
                 resolution.winner.clone(),
             );
@@ -2498,7 +2500,7 @@ impl ChessterEscrow {
     /// # Arguments
     /// * `env` - Environment reference.
     /// * `resolutions` - Vector of match resolutions.
-    pub fn batch_resolve_tournament_matches(env: Env, resolutions: Vec<BatchResolution>) {
+    pub fn batch_resolve_tournament_matches(env: Env, resolutions: Vec<MatchResolution>) {
         Self::batch_resolve_matches(env, resolutions);
     }
 
