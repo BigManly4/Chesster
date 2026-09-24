@@ -1,3 +1,10 @@
+# [1.16.0](https://github.com/Kaycee276/Chesster/compare/v1.15.0...v1.16.0) (2026-09-24)
+
+
+### Features
+
+* **frontend:** build Tournament Hub screen with category filters and search ([#228](https://github.com/Kaycee276/Chesster/issues/228)) ([b83b330](https://github.com/Kaycee276/Chesster/commit/b83b330e8f32ce483b490864c0b16ab67154c1f0))
+
 # [1.15.0](https://github.com/Kaycee276/Chesster/compare/v1.14.0...v1.15.0) (2026-09-24)
 
 
