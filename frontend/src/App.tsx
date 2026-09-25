@@ -7,6 +7,7 @@ import TournamentPage from "./pages/TournamentPage";
 import AnalysisPage from "./pages/AnalysisPage";
 import Toast from "./components/Toast";
 import ThemeSelector from "./components/ThemeSelector";
+import NetworkBanner from "./components/NetworkBanner";
 import { useWalletStore } from "./store/walletStore";
 import { useThemeStore, applyColorMode } from "./store/themeStore";
 
@@ -33,6 +34,7 @@ const App = () => {
 
 	return (
 		<BrowserRouter>
+			<NetworkBanner />
 			<Toast />
 			<Routes>
 				<Route path="/" element={<GameLobby />} />
