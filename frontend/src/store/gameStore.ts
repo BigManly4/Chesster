@@ -72,6 +72,7 @@ interface GameStore {
     walletAddress: string,
     wagerAmount?: string,
     timeControlSeconds?: number,
+    timeIncrementSeconds?: number,
   ) => Promise<void>;
   joinGame: (
     code: string,
@@ -136,12 +137,15 @@ export const useGameStore = create<GameStore>()(
         walletAddress: string,
         wagerAmount?: string,
         timeControlSeconds?: number,
+        timeIncrementSeconds?: number,
       ) => {
         const data = await api.createGame(
           "chess",
           walletAddress,
           wagerAmount,
           timeControlSeconds,
+          undefined,
+          timeIncrementSeconds,
         );
         if (data.success) {
           await get().joinGame(data.data.game_code, "white", walletAddress);

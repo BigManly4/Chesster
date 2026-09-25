@@ -4,6 +4,19 @@ import './index.css'
 import App from './App.tsx'
 import { validateFrontendEnv } from './utils/envValidator'
 
+const savedTheme = localStorage.getItem('chesster_theme')
+if (savedTheme) {
+  try {
+    const parsed = JSON.parse(savedTheme) as { state?: { boardTheme?: string } }
+    const boardTheme = parsed.state?.boardTheme
+    if (['classic', 'wood', 'neon', 'marble'].includes(boardTheme ?? '')) {
+      document.documentElement.dataset.theme = boardTheme
+    }
+  } catch {
+    // Zustand will fall back to the default theme during hydration.
+  }
+}
+
 validateFrontendEnv()
 
 createRoot(document.getElementById('root')!).render(

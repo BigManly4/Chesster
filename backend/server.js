@@ -17,6 +17,7 @@ const supabase = require("./config/supabase");
 const logger = require("./utils/logger");
 const { errorHandler, installGlobalHandlers } = require("./middleware/errorHandler");
 const { moderateMessage } = require("./services/chatService");
+const { csrfProtection } = require("./middleware/csrfMiddleware");
 const swaggerUi = require("swagger-ui-express");
 const swaggerDocument = require("./docs/swagger.json");
 
@@ -24,11 +25,12 @@ const app = express();
 const server = http.createServer(app);
 
 const CORS_ORIGIN = process.env.CORS_ORIGIN || "*";
+const corsOrigin = CORS_ORIGIN === "*" ? true : CORS_ORIGIN;
 
 const io = new Server(server, {
   cors: {
-    origin: CORS_ORIGIN,
-    methods: ["GET", "POST"],
+    origin: corsOrigin,
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
   },
 });
 
@@ -39,11 +41,17 @@ app.use(logger.requestMiddleware());
 
 app.use(
   cors({
-    origin: CORS_ORIGIN,
-    methods: ["GET", "POST"],
+    origin: corsOrigin,
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
+    credentials: true,
   }),
 );
 app.use(express.json());
+app.use(csrfProtection);
+
+app.get("/api/csrf-token", (req, res) => {
+  res.json({ success: true });
+});
 
 // Swagger API documentation (Issue #152)
 app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerDocument));
@@ -128,6 +136,24 @@ io.on("connection", (socket) => {
 
   socket.on("leave-game", (gameCode) => {
     socket.leave(gameCode);
+  });
+
+  socket.on("spectator:reaction", ({ gameCode, emoji } = {}) => {
+    const allowedEmojis = new Set(["🔥", "👏", "♟️", "🤯", "💀"]);
+    if (!gameCode || !allowedEmojis.has(emoji)) return;
+
+    const now = Date.now();
+    const recentReactions = (socket.data.reactionTimestamps || []).filter(
+      (timestamp) => now - timestamp < 1000,
+    );
+    if (recentReactions.length >= 2) return;
+    socket.data.reactionTimestamps = [...recentReactions, now];
+
+    io.to(gameCode).emit("spectator:reaction", {
+      id: `${socket.id}-${now}`,
+      emoji,
+      xOffset: 10 + Math.floor(Math.random() * 80),
+    });
   });
 
   socket.on("disconnect", () => {

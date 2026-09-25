@@ -8,6 +8,12 @@ export interface ChatMessage {
 	createdAt: string;
 }
 
+export interface SpectatorReaction {
+	id: string;
+	emoji: string;
+	xOffset: number;
+}
+
 const BACKEND_URL =
 	import.meta.env.VITE_BACKEND_URL || "http://localhost:3000/";
 
@@ -60,6 +66,19 @@ class SocketService {
 	onChatMessage(callback: (data: ChatMessage) => void) {
 		this.socket?.off("chat-message");
 		this.socket?.on("chat-message", callback);
+	}
+
+	sendReaction(gameCode: string, emoji: string) {
+		this.socket?.emit("spectator:reaction", { gameCode, emoji });
+	}
+
+	onReaction(callback: (data: SpectatorReaction) => void) {
+		this.socket?.off("spectator:reaction");
+		this.socket?.on("spectator:reaction", callback);
+	}
+
+	offReaction() {
+		this.socket?.off("spectator:reaction");
 	}
 
 	offChatMessage() {
