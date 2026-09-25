@@ -16,6 +16,7 @@ const cronService = require("./services/cronService");
 const supabase = require("./config/supabase");
 const logger = require("./utils/logger");
 const { errorHandler, installGlobalHandlers } = require("./middleware/errorHandler");
+const { createSocketRateLimiter } = require("./middleware/socketRateLimiter");
 const { moderateMessage } = require("./services/chatService");
 const swaggerUi = require("swagger-ui-express");
 const swaggerDocument = require("./docs/swagger.json");
@@ -31,6 +32,14 @@ const io = new Server(server, {
     methods: ["GET", "POST"],
   },
 });
+
+// Rate limit WebSocket handshake/connection attempts per IP to prevent
+// connection-flooding DoS before a socket is ever allocated (Issue #244).
+const socketHandshakeLimiter = createSocketRateLimiter({
+  windowMs: 60 * 1000,
+  max: 30,
+});
+io.engine.use((req, res, next) => socketHandshakeLimiter(req, res, next));
 
 const PORT = process.env.PORT || 3001;
 
