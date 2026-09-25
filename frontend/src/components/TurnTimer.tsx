@@ -1,9 +1,14 @@
+import { useEffect, useRef } from "react";
 import { Timer } from "lucide-react";
+import { soundService } from "../services/soundService";
 
 interface GameTimerProps {
 	secondsLeft: number;
 	totalSeconds: number;
 }
+
+/** Clock is considered "low" once it drops to this many seconds or fewer. */
+const LOW_TIME_THRESHOLD = 10;
 
 function formatTime(s: number): string {
 	const m = Math.floor(s / 60);
@@ -14,7 +19,17 @@ function formatTime(s: number): string {
 export default function GameTimer({ secondsLeft, totalSeconds }: GameTimerProps) {
 	const pct = totalSeconds > 0 ? (secondsLeft / totalSeconds) * 100 : 0;
 	const urgent = secondsLeft <= 60;
+	const lowTime = secondsLeft <= LOW_TIME_THRESHOLD;
 	const display = formatTime(secondsLeft);
+
+	// Play a warning tick once when the clock crosses into the low-time zone.
+	const wasLowRef = useRef(false);
+	useEffect(() => {
+		if (lowTime && secondsLeft > 0 && !wasLowRef.current) {
+			soundService.lowTime();
+		}
+		wasLowRef.current = lowTime && secondsLeft > 0;
+	}, [lowTime, secondsLeft]);
 
 	return (
 		<div className="flex items-center gap-2">

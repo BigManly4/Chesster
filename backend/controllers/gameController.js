@@ -203,6 +203,23 @@ class GameController {
 		}
 	}
 
+	async claimDraw(req, res) {
+		try {
+			const { gameCode } = req.params;
+			const game = await gameModel.claimDraw(gameCode);
+
+			timerService.clearTimer(gameCode);
+			timerService.clearClock(gameCode);
+
+			const io = req.app.get("io");
+			io.to(gameCode).emit("game-update", game);
+
+			res.json({ success: true, data: game });
+		} catch (error) {
+			res.status(400).json({ success: false, error: error.message });
+		}
+	}
+
 	async getChatMessages(req, res) {
 		try {
 			const { gameCode } = req.params;

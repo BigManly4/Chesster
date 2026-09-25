@@ -1,6 +1,8 @@
-import { useEffect, useState, useMemo } from "react";
+import { useEffect, useState, useMemo, useRef } from "react";
 import { useParams } from "react-router-dom";
 import { Eye, Users, TrendingUp, TrendingDown, Minus } from "lucide-react";
+import { api } from "../api/gameApi";
+import { socketService, type SpectatorReaction } from "../api/socket";
 
 const PIECE_SYMBOLS: Record<string, string> = {
 	K: "\u2654", Q: "\u2655", R: "\u2656", B: "\u2657", N: "\u2658", P: "\u2659",
@@ -107,12 +109,56 @@ function SpectatorBoard({ board }: { board: string[][] }) {
 	);
 }
 
+const REACTION_EMOJIS = ["🔥", "👏", "♟️", "🤯", "💀"];
+
+function ReactionFloatingBar({ gameCode }: { gameCode: string }) {
+	const reactionLocked = useRef(false);
+
+	const sendReaction = (emoji: string) => {
+		if (reactionLocked.current) return;
+		reactionLocked.current = true;
+		socketService.sendReaction(gameCode, emoji);
+		window.setTimeout(() => {
+			reactionLocked.current = false;
+		}, 500);
+	};
+
+	return (
+		<div className="absolute bottom-4 left-1/2 z-20 flex -translate-x-1/2 items-center gap-1 rounded-full border border-(--border) bg-(--bg-secondary)/95 p-2 shadow-xl backdrop-blur-sm">
+			{REACTION_EMOJIS.map((emoji) => (
+				<button
+					type="button"
+					key={emoji}
+					onClick={() => sendReaction(emoji)}
+					aria-label={`Send ${emoji} reaction`}
+					className="rounded-full px-2 py-1 text-xl transition-transform hover:scale-125 focus-visible:scale-125"
+				>
+					{emoji}
+				</button>
+			))}
+		</div>
+	);
+}
+
+function FloatingReaction({ reaction }: { reaction: SpectatorReaction }) {
+	return (
+		<div
+			className="pointer-events-none absolute bottom-20 z-10 text-3xl reaction-float-up"
+			style={{ left: `${reaction.xOffset}%` }}
+			aria-hidden="true"
+		>
+			{reaction.emoji}
+		</div>
+	);
+}
+
 export default function SpectatorPage() {
 	const { gameCode } = useParams<{ gameCode: string }>();
-	const [board] = useState(INITIAL_BOARD);
+	const [board, setBoard] = useState(INITIAL_BOARD);
 	const [moveHistory] = useState<string[]>([]);
 	const [evalScore] = useState(0);
 	const [spectatorCount] = useState(1);
+	const [reactions, setReactions] = useState<SpectatorReaction[]>([]);
 
 	const whiteMaterial = useMemo(() => {
 		let total = 0;
@@ -139,8 +185,36 @@ export default function SpectatorPage() {
 	}, [board]);
 
 	useEffect(() => {
-		const unsubscribe = () => {};
-		return unsubscribe;
+		if (!gameCode) return;
+		let active = true;
+		const socket = socketService.connect();
+		socketService.joinGame(gameCode);
+		socketService.onGameUpdate((game) => {
+			if (active && game.board_state) {
+				// The API uses snake_case for persisted game fields.
+				setBoard(game.board_state);
+			}
+		});
+		socketService.onReaction((reaction) => {
+			if (!active) return;
+			setReactions((current) => [...current, reaction]);
+			window.setTimeout(() => {
+				setReactions((current) => current.filter((item) => item.id !== reaction.id));
+			}, 2000);
+		});
+
+		api.getGame(gameCode).then((response) => {
+			if (active && response.success && response.data.board_state) {
+				setBoard(response.data.board_state);
+			}
+		}).catch(() => undefined);
+
+		return () => {
+			active = false;
+			socketService.offGameUpdate();
+			socketService.offReaction();
+			socket.disconnect();
+		};
 	}, [gameCode]);
 
 	return (
@@ -168,8 +242,12 @@ export default function SpectatorPage() {
 				<EvaluationBar evalScore={evalScore} />
 
 				{/* Board */}
-				<div className="w-full max-w-lg">
+				<div className="relative w-full max-w-lg">
 					<SpectatorBoard board={board} />
+					{reactions.map((reaction) => (
+						<FloatingReaction key={reaction.id} reaction={reaction} />
+					))}
+					{gameCode && <ReactionFloatingBar gameCode={gameCode} />}
 				</div>
 
 				{/* Move list */}
