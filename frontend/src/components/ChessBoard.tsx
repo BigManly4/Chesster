@@ -35,11 +35,14 @@ function tokenLabel(addr: string | null | undefined): string {
 }
 import { useState, useMemo, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { getPossibleMoves, getCapturedPieces, materialAdvantage } from "../utils/chessUtils";
+import { getPossibleMoves, getCapturedPieces, materialAdvantage, moveToAlgebraic, movesToPgn } from "../utils/chessUtils";
+import { getGameOutcome } from "../utils/gameResult";
+import { socketService } from "../api/socket";
 import PromotionModal from "./PromotionModal";
 import ConfirmModal from "./ConfirmModal";
 import TurnTimer from "./TurnTimer";
 import ChatPanel from "./ChatPanel";
+import GameResultModal from "./GameResultModal";
 
 const PIECE_SYMBOLS: Record<string, string> = {
 	K: "♔",
@@ -299,6 +302,7 @@ function ChessBoardInner() {
 		to: [number, number];
 	} | null>(null);
 	const [showPayoutModal, setShowPayoutModal] = useState(false);
+	const [showResultModal, setShowResultModal] = useState(false);
 	const [confirmAction, setConfirmAction] = useState<"resign" | "leave" | null>(null);
 	const [soundEnabled, setSoundEnabled] = useState(() => soundService.isEnabled());
 	const [volume, setVolume] = useState(() => soundService.getVolume());
@@ -361,6 +365,7 @@ function ChessBoardInner() {
 
 	const inCheck = useGameStore((s) => s.inCheck);
 	const winner = useGameStore((s) => s.winner);
+	const endReason = useGameStore((s) => s.endReason);
 	const drawOffer = useGameStore((s) => s.drawOffer);
 	const secondsLeft = useGameStore((s) => s.secondsLeft);
 	const timeControlSeconds = useGameStore((s) => s.timeControlSeconds);
@@ -380,6 +385,20 @@ function ChessBoardInner() {
 		status === "finished" &&
 		!!wagerAmount &&
 		(winner === playerColor || winner === "draw");
+
+	const gameOutcome = useMemo(
+		() => getGameOutcome(winner, playerColor),
+		[winner, playerColor],
+	);
+
+	const pgn = useMemo(() => {
+		const algebraicMoves = moveHistory.map((m) =>
+			moveToAlgebraic(m.from_position, m.to_position, m.promotion),
+		);
+		const resultTag =
+			winner === "draw" ? "1/2-1/2" : winner === "white" ? "1-0" : winner === "black" ? "0-1" : "*";
+		return movesToPgn(algebraicMoves, resultTag);
+	}, [moveHistory, winner]);
 
 	const capturedByWhite = useMemo(
 		() => getCapturedPieces(board, "white"),
@@ -485,6 +504,17 @@ function ChessBoardInner() {
 		}
 	}, [status, willReceiveTokens]);
 
+	// Auto-open the post-game result modal (PGN copy, rematch, share) when the
+	// game ends. Deferred to the (rarer) wagered-win case, which already gets
+	// the more detailed PayoutModal above — showing both at once would stack
+	// two full-screen overlays.
+	useEffect(() => {
+		if (status === "finished" && !willReceiveTokens) {
+			const timer = setTimeout(() => setShowResultModal(true), 0);
+			return () => clearTimeout(timer);
+		}
+	}, [status, willReceiveTokens]);
+
 	// Safety net: if ChessBoardInner ever receives a cancelled status
 	// (e.g. rejoining a cancelled game URL), redirect back to lobby.
 	useEffect(() => {
@@ -531,6 +561,12 @@ function ChessBoardInner() {
 
 	const handleAcceptDraw = async () => {
 		await acceptDraw();
+	};
+
+	const handleRequestRematch = () => {
+		if (!gameCode || !playerColor) return;
+		socketService.requestRematch(gameCode, playerColor);
+		addToast("Rematch request sent", "success");
 	};
 
 	const copyGameCode = async () => {
@@ -757,6 +793,19 @@ function ChessBoardInner() {
 						)}
 					</div>
 				</div>
+			)}
+
+			{/* ── Post-Game Result Modal ── */}
+			{showResultModal && status === "finished" && (
+				<GameResultModal
+					outcome={gameOutcome}
+					endReason={endReason}
+					gameCode={gameCode}
+					pgn={pgn}
+					txHash={escrowResolveTx}
+					onRematch={handleRequestRematch}
+					onClose={() => setShowResultModal(false)}
+				/>
 			)}
 
 			{/* ── Opponent Bar ── */}
