@@ -35,6 +35,8 @@ function tokenLabel(addr: string | null | undefined): string {
 }
 import { useState, useMemo, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
+import { getPossibleMoves, getCapturedPieces, materialAdvantage } from "../utils/chessUtils";
+import type { AnnotationArrow, AnnotationColor, SquareHighlight } from "../types/chess";
 import { getPossibleMoves, getCapturedPieces, materialAdvantage, moveToAlgebraic, movesToPgn } from "../utils/chessUtils";
 import { getGameOutcome } from "../utils/gameResult";
 import { socketService } from "../api/socket";
@@ -72,6 +74,22 @@ const BLACK_PIECE_STYLE: React.CSSProperties = {
 		"-1.5px -1.5px 0 #fff, 1.5px -1.5px 0 #fff, -1.5px 1.5px 0 #fff, 1.5px 1.5px 0 #fff",
 	WebkitTextStroke: "0.5px #fff",
 };
+
+// ── Board annotation colors (#252) ─────────────────────────────────────────────
+// Right-click plain = blue, Shift = green, Alt = red, Ctrl/Cmd = yellow.
+const ANNOTATION_COLORS: Record<AnnotationColor, string> = {
+	blue: "#3689e6",
+	green: "#22ac38",
+	red: "#e0403c",
+	yellow: "#e6c729",
+};
+
+function colorFromModifiers(e: { shiftKey: boolean; altKey: boolean; ctrlKey: boolean; metaKey: boolean }): AnnotationColor {
+	if (e.shiftKey) return "green";
+	if (e.altKey) return "red";
+	if (e.ctrlKey || e.metaKey) return "yellow";
+	return "blue";
+}
 
 // ── Skeleton shown while game state loads ─────────────────────────────────────
 function BoardSkeleton() {
@@ -603,6 +621,9 @@ function ChessBoardInner() {
 	};
 
 	const handleSquareClick = async (row: number, col: number) => {
+		// A plain left-click always clears any drawn arrows/highlights (#252).
+		clearAnnotations();
+
 		if (status !== "active" || currentTurn !== playerColor || isMoving) return;
 		if (viewingIndex !== null) return;
 		if (dragPiece) return; // a drag is in progress — its pointerup handles the drop
@@ -783,6 +804,91 @@ function ChessBoardInner() {
 		update();
 		return () => obs.disconnect();
 	}, []);
+
+	// ── Board annotations: right-click highlights & arrows (#252) ────────────
+	const boardGridRef = useRef<HTMLDivElement>(null);
+	const [highlights, setHighlights] = useState<SquareHighlight[]>([]);
+	const [arrows, setArrows] = useState<AnnotationArrow[]>([]);
+	const rightDragRef = useRef<{ row: number; col: number; color: AnnotationColor } | null>(null);
+
+	const squareFromClientPoint = (clientX: number, clientY: number): [number, number] | null => {
+		const el = boardGridRef.current;
+		if (!el) return null;
+		const rect = el.getBoundingClientRect();
+		const x = clientX - rect.left;
+		const y = clientY - rect.top;
+		if (x < 0 || y < 0 || x >= rect.width || y >= rect.height) return null;
+		const colIndex = Math.min(7, Math.floor((x / rect.width) * 8));
+		const rowIndex = Math.min(7, Math.floor((y / rect.height) * 8));
+		const row = playerColor === "black" ? 7 - rowIndex : rowIndex;
+		const col = playerColor === "black" ? 7 - colIndex : colIndex;
+		return [row, col];
+	};
+
+	const clearAnnotations = () => {
+		setHighlights((prev) => (prev.length ? [] : prev));
+		setArrows((prev) => (prev.length ? [] : prev));
+	};
+
+	const toggleHighlight = (row: number, col: number, color: AnnotationColor) => {
+		setHighlights((prev) => {
+			const idx = prev.findIndex((h) => h.row === row && h.col === col);
+			if (idx === -1) return [...prev, { row, col, color }];
+			if (prev[idx].color === color) return prev.filter((_, i) => i !== idx);
+			const next = [...prev];
+			next[idx] = { row, col, color };
+			return next;
+		});
+	};
+
+	const toggleArrow = (
+		fromRow: number,
+		fromCol: number,
+		toRow: number,
+		toCol: number,
+		color: AnnotationColor,
+	) => {
+		setArrows((prev) => {
+			const idx = prev.findIndex(
+				(a) => a.from[0] === fromRow && a.from[1] === fromCol && a.to[0] === toRow && a.to[1] === toCol,
+			);
+			if (idx === -1) return [...prev, { from: [fromRow, fromCol], to: [toRow, toCol], color }];
+			if (prev[idx].color === color) return prev.filter((_, i) => i !== idx);
+			const next = [...prev];
+			next[idx] = { from: [fromRow, fromCol], to: [toRow, toCol], color };
+			return next;
+		});
+	};
+
+	const handleSquareMouseDown = (e: React.MouseEvent, row: number, col: number) => {
+		if (e.button !== 2) return; // only the right mouse button draws annotations
+		e.preventDefault();
+		rightDragRef.current = { row, col, color: colorFromModifiers(e) };
+	};
+
+	const handleBoardMouseUp = (e: React.MouseEvent) => {
+		if (e.button !== 2) return;
+		const start = rightDragRef.current;
+		rightDragRef.current = null;
+		if (!start) return;
+		const target = squareFromClientPoint(e.clientX, e.clientY);
+		if (!target) return;
+		const [row, col] = target;
+		if (row === start.row && col === start.col) {
+			toggleHighlight(row, col, start.color);
+		} else {
+			toggleArrow(start.row, start.col, row, col, start.color);
+		}
+	};
+
+	// Square center in on-screen pixels, respecting the board's flip state,
+	// for positioning the SVG annotation overlay.
+	const squareCenterPx = (row: number, col: number) => {
+		const rowIndex = playerColor === "black" ? 7 - row : row;
+		const colIndex = playerColor === "black" ? 7 - col : col;
+		const squareSize = boardPx / 8;
+		return { x: colIndex * squareSize + squareSize / 2, y: rowIndex * squareSize + squareSize / 2 };
+	};
 
 	const displayBoard =
 		(playerColor === "black") !== flipped
@@ -976,6 +1082,7 @@ function ChessBoardInner() {
 				{boardPx > 0 && (
 				<div
 					ref={boardGridRef}
+					className={`relative rounded-sm overflow-hidden shadow-2xl transition-opacity ${isMoving ? "opacity-70" : "opacity-100"}`}
 					className={`rounded-sm overflow-hidden shadow-2xl transition-opacity ${isMoving ? "opacity-70" : "opacity-100"}`}
 					style={
 						{
@@ -988,6 +1095,11 @@ function ChessBoardInner() {
 							touchAction: "none",
 						} as React.CSSProperties
 					}
+					onContextMenu={(e) => e.preventDefault()}
+					onMouseUp={handleBoardMouseUp}
+					onMouseLeave={() => {
+						rightDragRef.current = null;
+					}}
 					onPointerMove={handleBoardPointerMove}
 					onPointerUp={endDrag}
 					onPointerCancel={handlePointerCancel}
@@ -1043,6 +1155,7 @@ function ChessBoardInner() {
 									e.preventDefault();
 									handleSquareClick(actualRow, actualCol);
 								}}
+								onMouseDown={(e) => handleSquareMouseDown(e, actualRow, actualCol)}
 								onPointerDown={(e) => handlePiecePointerDown(e, actualRow, actualCol)}
 							>
 								{/* Legal-move marker: dot on empty squares, ring on captures (#123) */}
@@ -1088,6 +1201,74 @@ function ChessBoardInner() {
 							</div>
 						);
 					}),
+				)}
+				{/* Right-click annotation overlay: arrows & square highlights (#252) */}
+				{(arrows.length > 0 || highlights.length > 0) && (
+					<svg
+						className="absolute inset-0 pointer-events-none"
+						width={boardPx}
+						height={boardPx}
+						style={{ zIndex: 5 }}
+					>
+						<defs>
+							{(Object.keys(ANNOTATION_COLORS) as AnnotationColor[]).map((color) => (
+								<marker
+									key={color}
+									id={`board-arrowhead-${color}`}
+									markerWidth="4"
+									markerHeight="4"
+									refX="2"
+									refY="2"
+									orient="auto-start-reverse"
+									markerUnits="strokeWidth"
+								>
+									<path d="M0,0 L4,2 L0,4 Z" fill={ANNOTATION_COLORS[color]} />
+								</marker>
+							))}
+						</defs>
+						{highlights.map((h, i) => {
+							const c = squareCenterPx(h.row, h.col);
+							const squareSize = boardPx / 8;
+							return (
+								<circle
+									key={`h-${i}`}
+									cx={c.x}
+									cy={c.y}
+									r={squareSize * 0.44}
+									fill="none"
+									stroke={ANNOTATION_COLORS[h.color]}
+									strokeWidth={squareSize * 0.08}
+									opacity={0.85}
+								/>
+							);
+						})}
+						{arrows.map((a, i) => {
+							const from = squareCenterPx(a.from[0], a.from[1]);
+							const to = squareCenterPx(a.to[0], a.to[1]);
+							const squareSize = boardPx / 8;
+							// Pull the line end back so the arrowhead doesn't sit under the piece.
+							const dx = to.x - from.x;
+							const dy = to.y - from.y;
+							const len = Math.hypot(dx, dy) || 1;
+							const shorten = squareSize * 0.4;
+							const endX = to.x - (dx / len) * shorten;
+							const endY = to.y - (dy / len) * shorten;
+							return (
+								<line
+									key={`a-${i}`}
+									x1={from.x}
+									y1={from.y}
+									x2={endX}
+									y2={endY}
+									stroke={ANNOTATION_COLORS[a.color]}
+									strokeWidth={squareSize * 0.14}
+									strokeLinecap="round"
+									opacity={0.85}
+									markerEnd={`url(#board-arrowhead-${a.color})`}
+								/>
+							);
+						})}
+					</svg>
 				)}
 				</div>
 				)}
