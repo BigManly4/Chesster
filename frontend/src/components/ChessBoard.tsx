@@ -540,9 +540,36 @@ function ChessBoardInner() {
 		setTimeout(() => setCopied(false), 1200);
 	};
 
+	// Shared by tap-to-move and drag-and-drop: attempts to move the piece on
+	// `from` to `to`, opening the promotion modal if needed and giving a
+	// short haptic tick on supported devices once the move lands (#253).
+	const commitMove = async (from: [number, number], to: [number, number]) => {
+		const piece = board[from[0]][from[1]];
+		const isPromotion = piece.toLowerCase() === "p" && (to[0] === 0 || to[0] === 7);
+
+		if (isPromotion) {
+			setPromotionMove({ from, to });
+			return;
+		}
+
+		setIsMoving(true);
+		const toastId = addToast("Moving...", "loading");
+		try {
+			await makeMove(from, to);
+			if ("vibrate" in navigator) navigator.vibrate(15);
+		} catch (error: unknown) {
+			addToast(friendlyError(error), "error");
+			selectSquare(null);
+		} finally {
+			removeToast(toastId);
+			setIsMoving(false);
+		}
+	};
+
 	const handleSquareClick = async (row: number, col: number) => {
 		if (status !== "active" || currentTurn !== playerColor || isMoving) return;
 		if (viewingIndex !== null) return;
+		if (dragPiece) return; // a drag is in progress — its pointerup handles the drop
 
 		if (!selectedSquare) {
 			const piece = board[row][col];
@@ -565,27 +592,120 @@ function ChessBoardInner() {
 				return;
 			}
 
-			const piece = board[selectedSquare[0]][selectedSquare[1]];
-			const isPromotion =
-				piece.toLowerCase() === "p" && (row === 0 || row === 7);
-
-			if (isPromotion) {
-				setPromotionMove({ from: selectedSquare, to: [row, col] });
-				return;
-			}
-
-			setIsMoving(true);
-			const toastId = addToast("Moving...", "loading");
-			try {
-				await makeMove(selectedSquare, [row, col]);
-			} catch (error: unknown) {
-				addToast(friendlyError(error), "error");
-				selectSquare(null);
-			} finally {
-				removeToast(toastId);
-				setIsMoving(false);
-			}
+			await commitMove(selectedSquare, [row, col]);
 		}
+	};
+
+	// ── Touch/mouse drag-and-drop (#253) ──────────────────────────────────────
+	// Pieces can be picked up and dragged to a target square, in addition to
+	// the tap-to-select / tap-to-move flow above. Pointer Events give us a
+	// single API that covers mouse, touch and pen.
+	const DRAG_THRESHOLD_PX = 6;
+	const boardGridRef = useRef<HTMLDivElement>(null);
+	const [dragPiece, setDragPiece] = useState<{
+		row: number;
+		col: number;
+		piece: string;
+		pointerId: number;
+		pointerType: string;
+		x: number;
+		y: number;
+	} | null>(null);
+	const pendingDragRef = useRef<{
+		row: number;
+		col: number;
+		piece: string;
+		pointerId: number;
+		pointerType: string;
+		startX: number;
+		startY: number;
+	} | null>(null);
+
+	const squareFromPoint = (clientX: number, clientY: number): [number, number] | null => {
+		const el = boardGridRef.current;
+		if (!el) return null;
+		const rect = el.getBoundingClientRect();
+		const x = clientX - rect.left;
+		const y = clientY - rect.top;
+		if (x < 0 || y < 0 || x >= rect.width || y >= rect.height) return null;
+		const colIndex = Math.min(7, Math.floor((x / rect.width) * 8));
+		const rowIndex = Math.min(7, Math.floor((y / rect.height) * 8));
+		const actualRow = playerColor === "black" ? 7 - rowIndex : rowIndex;
+		const actualCol = playerColor === "black" ? 7 - colIndex : colIndex;
+		return [actualRow, actualCol];
+	};
+
+	const handlePiecePointerDown = (e: React.PointerEvent, row: number, col: number) => {
+		if (e.pointerType === "mouse" && e.button !== 0) return;
+		if (status !== "active" || currentTurn !== playerColor || isMoving) return;
+		if (viewingIndex !== null) return;
+		const piece = board[row][col];
+		if (piece === "." || !isPlayerPiece(piece)) return;
+
+		pendingDragRef.current = {
+			row,
+			col,
+			piece,
+			pointerId: e.pointerId,
+			pointerType: e.pointerType,
+			startX: e.clientX,
+			startY: e.clientY,
+		};
+	};
+
+	const handleBoardPointerMove = (e: React.PointerEvent) => {
+		const pending = pendingDragRef.current;
+		if (pending && pending.pointerId === e.pointerId && !dragPiece) {
+			const dx = e.clientX - pending.startX;
+			const dy = e.clientY - pending.startY;
+			if (Math.hypot(dx, dy) >= DRAG_THRESHOLD_PX) {
+				(e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+				if (pending.pointerType === "touch" && "vibrate" in navigator) navigator.vibrate(10);
+				selectSquare([pending.row, pending.col]);
+				setDragPiece({
+					row: pending.row,
+					col: pending.col,
+					piece: pending.piece,
+					pointerId: pending.pointerId,
+					pointerType: pending.pointerType,
+					x: e.clientX,
+					y: e.clientY,
+				});
+			}
+			return;
+		}
+		if (dragPiece && dragPiece.pointerId === e.pointerId) {
+			setDragPiece((prev) => (prev ? { ...prev, x: e.clientX, y: e.clientY } : prev));
+		}
+	};
+
+	const endDrag = async (e: React.PointerEvent) => {
+		const pending = pendingDragRef.current;
+		if (pending && pending.pointerId === e.pointerId) {
+			pendingDragRef.current = null;
+		}
+		if (!dragPiece || dragPiece.pointerId !== e.pointerId) return;
+
+		const from: [number, number] = [dragPiece.row, dragPiece.col];
+		const target = squareFromPoint(e.clientX, e.clientY);
+		setDragPiece(null);
+
+		if (!target) return;
+		const [toRow, toCol] = target;
+		if (toRow === from[0] && toCol === from[1]) return;
+
+		const targetPiece = board[toRow][toCol];
+		if (targetPiece !== "." && isPlayerPiece(targetPiece)) {
+			selectSquare([toRow, toCol]);
+			return;
+		}
+
+		await commitMove(from, [toRow, toCol]);
+	};
+
+	const handlePointerCancel = (e: React.PointerEvent) => {
+		if (pendingDragRef.current?.pointerId === e.pointerId) pendingDragRef.current = null;
+		if (dragPiece?.pointerId === e.pointerId) setDragPiece(null);
 	};
 
 	const handlePromotion = async (piece: string) => {
@@ -806,6 +926,7 @@ function ChessBoardInner() {
 				)}
 				{boardPx > 0 && (
 				<div
+					ref={boardGridRef}
 					className={`rounded-sm overflow-hidden shadow-2xl transition-opacity ${isMoving ? "opacity-70" : "opacity-100"}`}
 					style={
 						{
@@ -815,8 +936,12 @@ function ChessBoardInner() {
 							gridTemplateColumns: "repeat(8, 1fr)",
 							gridTemplateRows: "repeat(8, 1fr)",
 							"--board-size": `${boardPx}px`,
+							touchAction: "none",
 						} as React.CSSProperties
 					}
+					onPointerMove={handleBoardPointerMove}
+					onPointerUp={endDrag}
+					onPointerCancel={handlePointerCancel}
 				>
 				{displayBoard.map((row, rowIndex) =>
 					row.map((piece, colIndex) => {
@@ -847,12 +972,14 @@ function ChessBoardInner() {
 								(actualRow === lastMoveForView.to[0] && actualCol === lastMoveForView.to[1]));
 						const isPieceAnimating = animKey === `${actualRow}-${actualCol}`;
 						const isCaptureSquare = captureKey === `${actualRow}-${actualCol}`;
+						const isDragSource =
+							dragPiece !== null && dragPiece.row === actualRow && dragPiece.col === actualCol;
 
 						return (
 							<div
 								key={`${rowIndex}-${colIndex}`}
 								data-testid={`square-${actualRow}-${actualCol}`}
-								className={`relative flex items-center justify-center cursor-pointer transition-[filter] hover:brightness-110 ${
+								className={`board-square relative flex items-center justify-center cursor-pointer transition-[filter] hover:brightness-110 ${
 									isLight ? "bg-(--sq-light)" : "bg-(--sq-dark)"
 								} ${selected ? "bg-yellow-400/75" : ""} ${
 									isKingInCheck ? "bg-red-500/80" : ""
@@ -867,6 +994,7 @@ function ChessBoardInner() {
 									e.preventDefault();
 									handleSquareClick(actualRow, actualCol);
 								}}
+								onPointerDown={(e) => handlePiecePointerDown(e, actualRow, actualCol)}
 							>
 								{/* Legal-move marker: dot on empty squares, ring on captures (#123) */}
 								{possible && !capture && (
@@ -894,6 +1022,7 @@ function ChessBoardInner() {
 										className="leading-none pointer-events-none"
 										style={{
 											fontSize: "calc(var(--board-size) / 8 * 0.72)",
+											opacity: isDragSource ? 0.35 : 1,
 											...(piece === piece.toUpperCase()
 												? WHITE_PIECE_STYLE
 												: BLACK_PIECE_STYLE),
@@ -912,6 +1041,28 @@ function ChessBoardInner() {
 					}),
 				)}
 				</div>
+				)}
+				{/* Dragged piece follows the pointer, elevated above the board (#253) */}
+				{dragPiece && boardPx > 0 && (
+					<span
+						className="fixed leading-none pointer-events-none z-50"
+						style={{
+							left: dragPiece.x,
+							top: dragPiece.y,
+							fontSize: `calc(${boardPx}px / 8 * 0.72)`,
+							transform:
+								dragPiece.pointerType === "touch"
+									? "translate(-50%, -50%) scale(1.2) translateY(-10px)"
+									: "translate(-50%, -50%) scale(1.1)",
+							filter: "drop-shadow(0 6px 8px rgb(0 0 0 / 0.45))",
+							transition: "transform 0.1s ease-out",
+							...(dragPiece.piece === dragPiece.piece.toUpperCase()
+								? WHITE_PIECE_STYLE
+								: BLACK_PIECE_STYLE),
+						} as React.CSSProperties}
+					>
+						{PIECE_SYMBOLS[dragPiece.piece]}
+					</span>
 				)}
 			</div>
 
