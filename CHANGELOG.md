@@ -1,3 +1,10 @@
+# [1.19.0](https://github.com/Kaycee276/Chesster/compare/v1.18.0...v1.19.0) (2026-09-25)
+
+
+### Features
+
+* **frontend:** add network/offline connection alert banner ([86ea021](https://github.com/Kaycee276/Chesster/commit/86ea021c0077610379ee5a1666be91bffc59f52c)), closes [#256](https://github.com/Kaycee276/Chesster/issues/256)
+
 # [1.18.0](https://github.com/Kaycee276/Chesster/compare/v1.17.0...v1.18.0) (2026-09-25)
 
 
