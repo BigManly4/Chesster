@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client'
 import './index.css'
 import App from './App.tsx'
 import { validateFrontendEnv } from './utils/envValidator'
+import { soundService } from './services/soundService'
 
 const savedTheme = localStorage.getItem('chesster_theme')
 if (savedTheme) {
@@ -18,6 +19,7 @@ if (savedTheme) {
 }
 
 validateFrontendEnv()
+soundService.unlockOnFirstInteraction()
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
