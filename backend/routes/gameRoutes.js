@@ -236,6 +236,26 @@ router.post('/games/:gameCode/draw/accept', gameController.acceptDraw);
 
 /**
  * @openapi
+ * /api/games/{gameCode}/draw/claim:
+ *   post:
+ *     summary: Claim a draw under the threefold repetition or 50-move rule
+ *     tags: [Games]
+ *     parameters:
+ *       - in: path
+ *         name: gameCode
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Draw claimed
+ *       400:
+ *         description: Draw cannot be claimed yet
+ */
+router.post('/games/:gameCode/draw/claim', gameController.claimDraw);
+
+/**
+ * @openapi
  * /api/games/{gameCode}/undo/request:
  *   post:
  *     summary: Request an undo move
