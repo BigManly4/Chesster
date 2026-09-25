@@ -2281,6 +2281,81 @@ fn test_batch_resolve_matches_rejects_exceeding_max() {
 }
 
 #[test]
+fn test_resolve_match_with_signature() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    use ed25519_dalek::{Signer, SigningKey};
+    use rand::rngs::OsRng;
+    use soroban_sdk::xdr::ToXdr;
+
+    let mut csprng = OsRng;
+    let signing_key = SigningKey::generate(&mut csprng);
+    let pubkey_bytes = signing_key.verifying_key().to_bytes();
+
+    let coordinator = Address::generate(&env);
+    let player1 = Address::generate(&env);
+    let player2 = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+
+    let (token, token_admin_client) = create_token_contract(&env, &token_admin);
+    token_admin_client.mint(&player1, &1000);
+    token_admin_client.mint(&player2, &1000);
+
+    let contract_id = env.register(ChessterEscrow, ());
+    let client = ChessterEscrowClient::new(&env, &contract_id);
+
+    client.init(&coordinator, &500);
+    client.add_whitelisted_token(&token.address);
+    client.set_coordinator_pubkey(&BytesN::from_array(&env, &pubkey_bytes));
+
+    let game_code = String::from_str(&env, "GAME_SIG");
+    approve(&env, &token, &player1, &contract_id, 100);
+    approve(&env, &token, &player2, &contract_id, 100);
+    client.create_match(&game_code, &player1, &token.address, &100);
+    client.join_match(&game_code, &player2);
+
+    let payload = MatchResolutionPayload {
+        match_id: game_code.clone(),
+        winner: Some(player1.clone()),
+        moves_hash: String::from_str(&env, "some_hash"),
+        nonce: 12345,
+    };
+
+    let payload_bytes = payload.clone().to_xdr(&env);
+    let signature = signing_key.sign(payload_bytes.to_alloc_vec().as_slice());
+    let sig_bytes = signature.to_bytes();
+
+    client.resolve_match_with_signature(&payload, &BytesN::from_array(&env, &sig_bytes));
+
+    let m = client.get_match(&game_code);
+    assert_eq!(m.status, MatchStatus::Resolved);
+    assert_eq!(token.balance(&player1), 1095);
+    assert_eq!(token.balance(&player2), 900);
+}
+
+#[test]
+#[should_panic(expected = "HostError")]
+fn test_resolve_match_with_invalid_signature() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    use ed25519_dalek::SigningKey;
+    use rand::rngs::OsRng;
+
+    let mut csprng = OsRng;
+    let signing_key = SigningKey::generate(&mut csprng);
+    let pubkey_bytes = signing_key.verifying_key().to_bytes();
+
+    let coordinator = Address::generate(&env);
+    let player1 = Address::generate(&env);
+    let player2 = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+
+    let (token, token_admin_client) = create_token_contract(&env, &token_admin);
+    token_admin_client.mint(&player1, &1000);
+    token_admin_client.mint(&player2, &1000);
+
 fn test_batch_resolve_five_matches() {
     let env = Env::default();
     env.mock_all_auths();
@@ -2294,6 +2369,76 @@ fn test_batch_resolve_five_matches() {
 
     client.init(&coordinator, &500);
     client.add_whitelisted_token(&token.address);
+    client.set_coordinator_pubkey(&BytesN::from_array(&env, &pubkey_bytes));
+
+    let game_code = String::from_str(&env, "GAME_SIG_BAD");
+    approve(&env, &token, &player1, &contract_id, 100);
+    approve(&env, &token, &player2, &contract_id, 100);
+    client.create_match(&game_code, &player1, &token.address, &100);
+    client.join_match(&game_code, &player2);
+
+    let payload = MatchResolutionPayload {
+        match_id: game_code.clone(),
+        winner: Some(player1.clone()),
+        moves_hash: String::from_str(&env, "some_hash"),
+        nonce: 12345,
+    };
+
+    let bad_sig_bytes = [0u8; 64];
+    client.resolve_match_with_signature(&payload, &BytesN::from_array(&env, &bad_sig_bytes));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #43)")]
+fn test_resolve_match_with_used_nonce() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    use ed25519_dalek::{Signer, SigningKey};
+    use rand::rngs::OsRng;
+    use soroban_sdk::xdr::ToXdr;
+
+    let mut csprng = OsRng;
+    let signing_key = SigningKey::generate(&mut csprng);
+    let pubkey_bytes = signing_key.verifying_key().to_bytes();
+
+    let coordinator = Address::generate(&env);
+    let player1 = Address::generate(&env);
+    let player2 = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+
+    let (token, token_admin_client) = create_token_contract(&env, &token_admin);
+    token_admin_client.mint(&player1, &1000);
+    token_admin_client.mint(&player2, &1000);
+
+    let contract_id = env.register(ChessterEscrow, ());
+    let client = ChessterEscrowClient::new(&env, &contract_id);
+
+    client.init(&coordinator, &500);
+    client.add_whitelisted_token(&token.address);
+    client.set_coordinator_pubkey(&BytesN::from_array(&env, &pubkey_bytes));
+
+    let game_code = String::from_str(&env, "GAME_SIG_NONCE");
+    approve(&env, &token, &player1, &contract_id, 100);
+    approve(&env, &token, &player2, &contract_id, 100);
+    client.create_match(&game_code, &player1, &token.address, &100);
+    client.join_match(&game_code, &player2);
+
+    let payload = MatchResolutionPayload {
+        match_id: game_code.clone(),
+        winner: Some(player1.clone()),
+        moves_hash: String::from_str(&env, "some_hash"),
+        nonce: 12345,
+    };
+
+    let payload_bytes = payload.clone().to_xdr(&env);
+    let signature = signing_key.sign(payload_bytes.to_alloc_vec().as_slice());
+    let sig_bytes = signature.to_bytes();
+
+    client.resolve_match_with_signature(&payload, &BytesN::from_array(&env, &sig_bytes));
+
+    // Should panic on second invocation
+    client.resolve_match_with_signature(&payload, &BytesN::from_array(&env, &sig_bytes));
 
     let mut resolutions = Vec::new(&env);
     for i in 0..5 {
