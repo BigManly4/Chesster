@@ -1,3 +1,5 @@
+import { csrfFetch } from "./gameApi";
+
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || "http://localhost:3000/";
 const API_URL = `${BACKEND_URL}api`;
 
@@ -93,7 +95,7 @@ export const joinTournament = async (
   tournamentId: string | number,
   walletAddress: string,
 ): Promise<TournamentParticipant> => {
-  const res = await fetch(`${API_URL}/tournaments/${tournamentId}/register`, {
+  const res = await csrfFetch(`${API_URL}/tournaments/${tournamentId}/register`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ walletAddress }),
