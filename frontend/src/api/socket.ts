@@ -84,6 +84,21 @@ class SocketService {
 	offChatMessage() {
 		this.socket?.off("chat-message");
 	}
+
+	requestRematch(gameCode: string, playerColor: string) {
+		this.socket?.emit("request-rematch", { gameCode, playerColor });
+	}
+
+	onRematchRequested(
+		callback: (data: { gameCode: string; playerColor: string }) => void,
+	) {
+		this.socket?.off("rematch-requested");
+		this.socket?.on("rematch-requested", callback);
+	}
+
+	offRematchRequested() {
+		this.socket?.off("rematch-requested");
+	}
 }
 
 export const socketService = new SocketService();

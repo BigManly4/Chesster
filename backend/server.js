@@ -182,6 +182,13 @@ io.on("connection", (socket) => {
     timerService.startReconnectGrace(gameCode, playerColor);
   });
 
+  // Relay a rematch challenge to the opponent (Issue #254). No persisted
+  // state — purely a transient notification between the two live sockets.
+  socket.on("request-rematch", ({ gameCode, playerColor }) => {
+    if (!gameCode || !["white", "black"].includes(playerColor)) return;
+    socket.to(gameCode).emit("rematch-requested", { gameCode, playerColor });
+  });
+
   socket.on("send-chat", async ({ gameCode, playerColor, message }) => {
     if (!gameCode || !playerColor || !message) return;
     if (!["white", "black"].includes(playerColor)) return;

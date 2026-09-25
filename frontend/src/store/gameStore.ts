@@ -602,6 +602,17 @@ export const useGameNotifications = () => {
     }
   }, [drawOffer, playerColor, status, addToast]);
 
+  // Notify this player when the opponent requests a rematch (Issue #254).
+  useEffect(() => {
+    if (!gameCode || !playerColor) return;
+    const handler = (data: { gameCode: string; playerColor: string }) => {
+      if (data.gameCode !== gameCode || data.playerColor === playerColor) return;
+      addToast("Opponent wants a rematch!", "info");
+    };
+    socketService.onRematchRequested(handler);
+    return () => socketService.offRematchRequested();
+  }, [gameCode, playerColor, addToast]);
+
   // Poll the DB every 3 s while waiting for the opponent to join.
   // Clears automatically when status leaves "waiting".
   useEffect(() => {
