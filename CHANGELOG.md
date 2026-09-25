@@ -1,3 +1,10 @@
+# [1.21.0](https://github.com/Kaycee276/Chesster/compare/v1.20.0...v1.21.0) (2026-09-25)
+
+
+### Features
+
+* **frontend:** add right-click arrows and square highlights to the board ([23482a5](https://github.com/Kaycee276/Chesster/commit/23482a524797106a324bb80caca97d7ba830b6bc))
+
 # [1.20.0](https://github.com/Kaycee276/Chesster/compare/v1.19.0...v1.20.0) (2026-09-25)
 
 
