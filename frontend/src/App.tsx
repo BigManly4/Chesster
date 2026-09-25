@@ -5,6 +5,7 @@ import GamePage from "./pages/GamePage";
 import SpectatorPage from "./pages/SpectatorPage";
 import TournamentPage from "./pages/TournamentPage";
 import ProfilePage from "./pages/ProfilePage";
+import TournamentBracketPage from "./pages/TournamentBracketPage";
 import AnalysisPage from "./pages/AnalysisPage";
 import Toast from "./components/Toast";
 import ThemeSelector from "./components/ThemeSelector";
@@ -41,6 +42,10 @@ const App = () => {
 				<Route path="/" element={<GameLobby />} />
 				<Route path="/tournaments" element={<TournamentPage />} />
 				<Route path="/profile/:address" element={<ProfilePage />} />
+				<Route
+					path="/tournaments/:tournamentId/bracket"
+					element={<TournamentBracketPage />}
+				/>
 				<Route path="/analysis" element={<AnalysisPage />} />
 				<Route path="/:gameCode" element={<GamePage />} />
 				<Route path="/spectate/:gameCode" element={<SpectatorPage />} />
