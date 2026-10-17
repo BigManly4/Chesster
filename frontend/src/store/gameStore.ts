@@ -103,6 +103,9 @@ interface GameStore {
   // Move confirmation for high-stakes games (Issue #493)
   isMoveConfirmationEnabled: boolean;
   toggleMoveConfirmation: () => void;
+  // Piece set preference for rendering (Issue #495)
+  pieceSet: "classic" | "neo" | "wood";
+  setPieceSet: (set: "classic" | "neo" | "wood") => void;
   masterVolume: number;
   setMasterVolume: (volume: number) => void;
   // Settings modal visibility
@@ -177,6 +180,7 @@ export const useGameStore = create<GameStore>()(
       isStreamerMode: false,
       isHapticsEnabled: true,
       isMoveConfirmationEnabled: false,
+      pieceSet: "classic" as "classic" | "neo" | "wood",
       masterVolume: soundService.getVolume(),
       isSettingsOpen: false,
 
@@ -188,6 +192,8 @@ export const useGameStore = create<GameStore>()(
         set((s) => ({ isHapticsEnabled: !s.isHapticsEnabled })),
       toggleMoveConfirmation: () =>
         set((s) => ({ isMoveConfirmationEnabled: !s.isMoveConfirmationEnabled })),
+      setPieceSet: (set_value: "classic" | "neo" | "wood") =>
+        set({ pieceSet: set_value }),
       setMasterVolume: (volume: number) => {
         const normalized = Math.min(1, Math.max(0, volume));
         soundService.setMasterVolume(normalized);
@@ -610,6 +616,7 @@ export const useGameStore = create<GameStore>()(
         isStreamerMode: state.isStreamerMode,
         isHapticsEnabled: state.isHapticsEnabled,
         isMoveConfirmationEnabled: state.isMoveConfirmationEnabled,
+        pieceSet: state.pieceSet,
       }),
     }
   )

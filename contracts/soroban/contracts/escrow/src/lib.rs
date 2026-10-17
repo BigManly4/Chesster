@@ -14,6 +14,8 @@ pub const DISPUTE_TIMELOCK_SECS: u64 = 172_800;
 pub const MAX_BATCH_RESOLUTIONS: u32 = 10;
 /// Maximum number of expired waiting lobbies refundable in one transaction (Issue #503).
 pub const MAX_BATCH_REFUNDS: u32 = 10;
+/// Maximum number of tournament matches cancellable in one transaction (Issue #458).
+pub const MAX_BATCH_TOURNAMENT_CANCELLATIONS: u32 = 20;
 /// Duration (in seconds) after which settled or refunded matches become eligible for garbage collection (30 days).
 pub const STALE_MATCH_THRESHOLD_SECS: u64 = 2_592_000;
 /// Maximum number of game codes allowed in a single stale match garbage collection batch (Issue #380).
@@ -38,6 +40,8 @@ pub const DEFAULT_MAX_WAGER: i128 = i128::MAX;
 pub const MAX_TOURNAMENT_FEE_BPS: u32 = 500;
 /// Upper bound on a per-asset protocol fee tier configured via `AssetConfig` (Issue #431).
 pub const MAX_ASSET_FEE_BPS: u32 = 1_000;
+/// Upper bound on the protocol fee taken from a losing spectator side pool (Issue #459).
+pub const MAX_SIDE_BET_FEE_BPS: u32 = 500;
 /// Basis points denominator (10,000 bps = 100%) (Issue #221).
 pub const BPS_DENOMINATOR: i128 = 10_000;
 /// Mutual cancellation proposals expire after fifteen minutes.
@@ -163,6 +167,12 @@ pub enum EscrowErrorExt {
     ArithmeticOverflow = 51,
     /// Wager is below the minimum configured for this specific token (Issue #460).
     WagerBelowTokenMinimum = 52,
+    /// Match players are not registered in the tournament, or it uses another token (Issue #458).
+    MatchNotInTournament = 53,
+    /// Side bets cannot be claimed until the match is resolved or refunded (Issue #459).
+    SideBetsNotSettled = 54,
+    /// Side bet token differs from the match wager token (Issue #459).
+    SideBetTokenMismatch = 55,
 }
 
 /// Payload for player deposit authorization with nonce-based replay protection (Issue #284).
@@ -219,7 +229,86 @@ pub struct SideBet {
     pub amount: i128,
 }
 
-/// Spectator side bet pool for a match.
+/// Side of the board a spectator backs: White is `player1` (creator), Black is `player2`.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PlayerColor {
+    White = 0,
+    Black = 1,
+}
+
+/// Settlement state of a match's spectator side pool (Issue #459).
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SideBetOutcome {
+    /// Match still running; bets may be placed until betting closes.
+    Open = 0,
+    /// White won: White bettors share the Black pool minus the protocol fee.
+    WhiteWon = 1,
+    /// Black won: Black bettors share the White pool minus the protocol fee.
+    BlackWon = 2,
+    /// Draw, refund, cancellation, or nobody backed the winner: every stake is returned in full.
+    Refund = 3,
+}
+
+/// Aggregate spectator side pool for a match (Issue #459). Individual stakes live under
+/// `DataKey::SideBetStake` so that placing, settling and claiming never iterate over bettors.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SideBetLedger {
+    pub game_code: String,
+    /// Match wager token; side bets are always placed in it.
+    pub token: Address,
+    pub total_white_bets: i128,
+    pub total_black_bets: i128,
+    pub outcome: SideBetOutcome,
+    /// Set by the coordinator (e.g. at move 10) to stop new bets on a live match.
+    pub betting_closed: bool,
+    /// Protocol fee taken from the losing pool at settlement.
+    pub fee_collected: i128,
+    /// Losing pool minus fee, shared pro rata by winning bettors.
+    pub distributable: i128,
+    /// Winning-side stake that has not been claimed yet.
+    pub unclaimed_winning_stake: i128,
+    /// Part of `distributable` not yet paid out; the last winning claim sweeps the rounding
+    /// remainder to the treasury.
+    pub unclaimed_profit: i128,
+    /// Tokens still held for this pool. The ledger may be removed once this reaches zero.
+    pub outstanding: i128,
+}
+
+/// Published when a spectator places a side bet (Issue #459).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SideBetPlacedEvent {
+    pub game_code: String,
+    pub bettor: Address,
+    pub color: PlayerColor,
+    pub amount: i128,
+}
+
+/// Published when a match's side pool is settled (Issue #459).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SideBetsSettledEvent {
+    pub game_code: String,
+    pub outcome: SideBetOutcome,
+    pub fee_collected: i128,
+}
+
+/// Published when a spectator claims a settled side bet (Issue #459).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SideBetClaimedEvent {
+    pub game_code: String,
+    pub bettor: Address,
+    pub payout: i128,
+    /// Rounding remainder sent to the treasury by the final winning claim.
+    pub treasury_remainder: i128,
+}
+
+/// Legacy spectator side bet pool for a match (Issue #35). No new bets are recorded here;
+/// pools created before the upgrade to `SideBetLedger` are still settled at match end.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SidePool {
@@ -554,6 +643,16 @@ pub struct AssetConfigUpdatedEvent {
 pub struct BatchRefundedEvent {
     pub count: u32,
     pub game_codes: Vec<String>,
+}
+
+/// Published after the coordinator cancels a batch of stalled tournament matches (Issue #458).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TournamentMatchesCancelledEvent {
+    pub tournament_id: String,
+    pub refunded_count: u32,
+    pub game_codes: Vec<String>,
+    pub token: Address,
 }
 
 #[contracttype]
@@ -944,6 +1043,12 @@ pub enum DataKey {
     AssetDecimals(Address),
     /// Cumulative protocol fees collected for a token.
     TotalFeesCollected(Address),
+    /// Spectator side pool for a match (Issue #459).
+    SideBetPool(String),
+    /// A spectator's stake on one side of a match (Issue #459).
+    SideBetStake(String, Address, PlayerColor),
+    /// Protocol fee (bps) taken from losing spectator side pools (Issue #459).
+    SideBetFeeBps,
 }
 
 /// Aggregated operational metrics for off-chain indexing and monitoring (Issue #288).
@@ -3280,26 +3385,28 @@ impl ChessterEscrow {
         release_reentrancy(&env);
     }
 
-    /// Places a spectator side bet on predicted match winner (Issue #35).
+    /// Places a spectator side bet backing one player of a match (Issues #35, #459).
+    ///
+    /// Stakes are segregated into White (`player1`) and Black (`player2`) pools and are
+    /// settled when the match ends; winnings are withdrawn with `claim_side_bet`.
     ///
     /// # Arguments
     /// * `env` - Environment reference.
     /// * `game_code` - Unique match game code.
-    /// * `spectator` - Spectator address placing bet.
-    /// * `predicted_winner` - Address of predicted winner.
-    /// * `amount` - Staked bet amount.
+    /// * `bettor` - Spectator placing the bet (players cannot bet on their own match).
+    /// * `chosen_player` - Player backed to win; must be `player1` or the joined `player2`.
+    /// * `token` - Must be the match wager token.
+    /// * `amount` - Stake, subject to the token's wager limits.
     pub fn place_side_bet(
         env: Env,
         game_code: String,
-        spectator: Address,
-        predicted_winner: Address,
+        bettor: Address,
+        chosen_player: Address,
+        token: Address,
         amount: i128,
     ) {
-        spectator.require_auth();
+        bettor.require_auth();
         let _guard = ReentrancyGuard::new(&env);
-        if amount <= 0 {
-            panic_with_error!(&env, EscrowError::InvalidWager);
-        }
 
         let m = Self::load_match(&env, &game_code);
 
@@ -3312,43 +3419,349 @@ impl ChessterEscrow {
             panic_with_error!(&env, EscrowError::MatchExpired);
         }
 
-        if predicted_winner != m.player1 && Some(predicted_winner.clone()) != m.player2 {
-            panic_with_error!(&env, EscrowError::InvalidWinner);
+        if bettor == m.player1 || Some(bettor.clone()) == m.player2 {
+            panic_with_error!(&env, EscrowError::Unauthorized);
         }
 
-        Self::deposit_wager(&env, &m.token, &spectator, amount);
-
-        let pool_key = (Symbol::new(&env, "side_p"), game_code.clone());
-        let mut pool: SidePool = env
-            .storage()
-            .persistent()
-            .get(&pool_key)
-            .unwrap_or_else(|| SidePool {
-                game_code: game_code.clone(),
-                total_player1_side_staked: 0,
-                total_player2_side_staked: 0,
-                bets: Vec::new(&env),
-            });
-
-        if predicted_winner == m.player1 {
-            pool.total_player1_side_staked =
-                checked_add(&env, pool.total_player1_side_staked, amount);
+        let color = if chosen_player == m.player1 {
+            PlayerColor::White
+        } else if Some(chosen_player) == m.player2 {
+            PlayerColor::Black
         } else {
-            pool.total_player2_side_staked =
-                checked_add(&env, pool.total_player2_side_staked, amount);
+            panic_with_error!(&env, EscrowError::InvalidWinner);
+        };
+
+        if token != m.token {
+            panic_with_error!(&env, EscrowErrorExt::SideBetTokenMismatch);
+        }
+        Self::validate_wager_amount(&env, &token, amount);
+
+        let mut ledger = Self::side_bet_ledger(&env, &game_code)
+            .unwrap_or_else(|| Self::new_side_bet_ledger(&game_code, &token));
+        if ledger.betting_closed {
+            panic_with_error!(&env, EscrowError::SideBetClosed);
         }
 
-        pool.bets.push_back(SideBet {
-            spectator,
-            predicted_winner,
-            amount,
-        });
+        Self::deposit_wager(&env, &token, &bettor, amount);
 
-        env.storage().persistent().set(&pool_key, &pool);
-        Self::bump_entry_ttl(&env, &pool_key);
+        match color {
+            PlayerColor::White => {
+                ledger.total_white_bets = checked_add(&env, ledger.total_white_bets, amount)
+            }
+            PlayerColor::Black => {
+                ledger.total_black_bets = checked_add(&env, ledger.total_black_bets, amount)
+            }
+        }
+        ledger.outstanding = checked_add(&env, ledger.outstanding, amount);
+        Self::store_side_bet_ledger(&env, &ledger);
+
+        let stake_key = DataKey::SideBetStake(game_code.clone(), bettor.clone(), color);
+        let stake: i128 = env.storage().persistent().get(&stake_key).unwrap_or(0);
+        env.storage()
+            .persistent()
+            .set(&stake_key, &checked_add(&env, stake, amount));
+        Self::bump_entry_ttl(&env, &stake_key);
+
+        env.events().publish(
+            (symbol_short!("side_bet"), game_code.clone()),
+            SideBetPlacedEvent {
+                game_code,
+                bettor,
+                color,
+                amount,
+            },
+        );
     }
 
-    /// Retrieves side bet pool details for a match (Issue #35).
+    /// Stops new side bets on a live match, e.g. once the game reaches move 10 (Coordinator only) (Issue #459).
+    pub fn close_side_betting(env: Env, game_code: String) {
+        let coordinator = Self::get_coordinator(env.clone());
+        coordinator.require_auth();
+
+        let m = Self::load_match(&env, &game_code);
+        if m.status != MatchStatus::Pending && m.status != MatchStatus::Active {
+            panic_with_error!(&env, EscrowError::SideBetClosed);
+        }
+
+        let mut ledger = Self::side_bet_ledger(&env, &game_code)
+            .unwrap_or_else(|| Self::new_side_bet_ledger(&game_code, &m.token));
+        ledger.betting_closed = true;
+        Self::store_side_bet_ledger(&env, &ledger);
+    }
+
+    /// Withdraws everything a spectator is owed from a settled side pool (Issue #459).
+    ///
+    /// Winners receive their stake plus a pro-rata share of the losing pool after the
+    /// protocol fee; on a refund every stake is returned in full. A losing stake pays out
+    /// zero and is cleared. Pull-based, so settlement never loops over bettors.
+    ///
+    /// # Returns
+    /// * `i128` - Amount transferred to `bettor`.
+    pub fn claim_side_bet(env: Env, game_code: String, bettor: Address) -> i128 {
+        bettor.require_auth();
+        let _guard = ReentrancyGuard::new(&env);
+
+        let mut ledger = Self::side_bet_ledger(&env, &game_code)
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::SideBetNotFound));
+        if ledger.outcome == SideBetOutcome::Open {
+            panic_with_error!(&env, EscrowErrorExt::SideBetsNotSettled);
+        }
+
+        let white = Self::take_side_bet_stake(&env, &game_code, &bettor, PlayerColor::White);
+        let black = Self::take_side_bet_stake(&env, &game_code, &bettor, PlayerColor::Black);
+        if white == 0 && black == 0 {
+            panic_with_error!(&env, EscrowError::SideBetNotFound);
+        }
+
+        let winning_stake = match ledger.outcome {
+            SideBetOutcome::WhiteWon => white,
+            SideBetOutcome::BlackWon => black,
+            _ => 0,
+        };
+
+        let mut treasury_remainder = 0;
+        let payout = if ledger.outcome == SideBetOutcome::Refund {
+            checked_add(&env, white, black)
+        } else if winning_stake == 0 {
+            0
+        } else {
+            let winning_total = match ledger.outcome {
+                SideBetOutcome::WhiteWon => ledger.total_white_bets,
+                _ => ledger.total_black_bets,
+            };
+            let profit = checked_mul_div(&env, winning_stake, ledger.distributable, winning_total);
+            ledger.unclaimed_winning_stake =
+                checked_sub(&env, ledger.unclaimed_winning_stake, winning_stake);
+            ledger.unclaimed_profit = checked_sub(&env, ledger.unclaimed_profit, profit);
+            if ledger.unclaimed_winning_stake == 0 {
+                treasury_remainder = ledger.unclaimed_profit;
+                ledger.unclaimed_profit = 0;
+            }
+            checked_add(&env, winning_stake, profit)
+        };
+
+        // Effects before interactions: final accounting is stored before any transfer.
+        let released = checked_add(&env, payout, treasury_remainder);
+        ledger.outstanding = checked_sub(&env, ledger.outstanding, released);
+        Self::sub_locked(&env, &ledger.token, released);
+        Self::store_side_bet_ledger(&env, &ledger);
+
+        let token_client = token::Client::new(&env, &ledger.token);
+        if payout > 0 {
+            token_client.transfer(&env.current_contract_address(), &bettor, &payout);
+        }
+        if treasury_remainder > 0 {
+            token_client.transfer(
+                &env.current_contract_address(),
+                &Self::side_bet_fee_recipient(&env),
+                &treasury_remainder,
+            );
+        }
+        Self::assert_balance_invariant(&env, &ledger.token);
+
+        env.events().publish(
+            (symbol_short!("side_clm"), game_code.clone()),
+            SideBetClaimedEvent {
+                game_code,
+                bettor,
+                payout,
+                treasury_remainder,
+            },
+        );
+        payout
+    }
+
+    /// Sets the protocol fee taken from losing side pools, at most `MAX_SIDE_BET_FEE_BPS` (Coordinator only) (Issue #459).
+    pub fn set_side_bet_fee_bps(env: Env, fee_bps: u32) {
+        let coordinator = Self::get_coordinator(env.clone());
+        coordinator.require_auth();
+        // Reuses InvalidWager, mirroring the existing set_fee_bps convention.
+        if fee_bps > MAX_SIDE_BET_FEE_BPS {
+            panic_with_error!(&env, EscrowError::InvalidWager);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::SideBetFeeBps, &fee_bps);
+        Self::bump_instance_ttl(&env);
+    }
+
+    /// Protocol fee (bps) taken from losing side pools; defaults to zero (Issue #459).
+    pub fn get_side_bet_fee_bps(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::SideBetFeeBps)
+            .unwrap_or(0)
+    }
+
+    /// Side pool for a match, if any bets were placed or betting was closed (Issue #459).
+    pub fn get_side_bet_ledger(env: Env, game_code: String) -> Option<SideBetLedger> {
+        Self::side_bet_ledger(&env, &game_code)
+    }
+
+    /// Unclaimed stake a bettor holds on one side of a match (Issue #459).
+    pub fn get_side_bet_stake(
+        env: Env,
+        game_code: String,
+        bettor: Address,
+        color: PlayerColor,
+    ) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::SideBetStake(game_code, bettor, color))
+            .unwrap_or(0)
+    }
+
+    fn new_side_bet_ledger(game_code: &String, token: &Address) -> SideBetLedger {
+        SideBetLedger {
+            game_code: game_code.clone(),
+            token: token.clone(),
+            total_white_bets: 0,
+            total_black_bets: 0,
+            outcome: SideBetOutcome::Open,
+            betting_closed: false,
+            fee_collected: 0,
+            distributable: 0,
+            unclaimed_winning_stake: 0,
+            unclaimed_profit: 0,
+            outstanding: 0,
+        }
+    }
+
+    fn side_bet_ledger(env: &Env, game_code: &String) -> Option<SideBetLedger> {
+        let key = DataKey::SideBetPool(game_code.clone());
+        let ledger = env.storage().persistent().get(&key);
+        if ledger.is_some() {
+            Self::bump_entry_ttl(env, &key);
+        }
+        ledger
+    }
+
+    fn store_side_bet_ledger(env: &Env, ledger: &SideBetLedger) {
+        let key = DataKey::SideBetPool(ledger.game_code.clone());
+        env.storage().persistent().set(&key, ledger);
+        Self::bump_entry_ttl(env, &key);
+    }
+
+    fn take_side_bet_stake(
+        env: &Env,
+        game_code: &String,
+        bettor: &Address,
+        color: PlayerColor,
+    ) -> i128 {
+        let key = DataKey::SideBetStake(game_code.clone(), bettor.clone(), color);
+        let stake: i128 = env.storage().persistent().get(&key).unwrap_or(0);
+        if stake > 0 {
+            env.storage().persistent().remove(&key);
+        }
+        stake
+    }
+
+    fn side_bet_fee_recipient(env: &Env) -> Address {
+        Self::get_treasury_vault(env.clone()).unwrap_or_else(|| Self::get_coordinator(env.clone()))
+    }
+
+    /// Settles all spectator bets on a match that just reached a terminal state.
+    /// `winner` is the winning player for a decisive result and `None` for a draw or
+    /// any refund/cancellation path. New-style pools are settled in O(1) and paid out via
+    /// `claim_side_bet`; a legacy `SidePool` is paid out immediately as before.
+    fn settle_side_bets(env: &Env, game_code: &String, m: &Match, winner: Option<&Address>) {
+        Self::settle_legacy_side_pool(env, game_code, m, winner);
+
+        let Some(mut ledger) = Self::side_bet_ledger(env, game_code) else {
+            return;
+        };
+        if ledger.outcome != SideBetOutcome::Open {
+            return;
+        }
+
+        let decisive = winner.map(|w| {
+            if *w == m.player1 {
+                (
+                    SideBetOutcome::WhiteWon,
+                    ledger.total_white_bets,
+                    ledger.total_black_bets,
+                )
+            } else {
+                (
+                    SideBetOutcome::BlackWon,
+                    ledger.total_black_bets,
+                    ledger.total_white_bets,
+                )
+            }
+        });
+
+        match decisive {
+            Some((outcome, winning_total, losing_total)) if winning_total > 0 => {
+                let fee_bps = Self::get_side_bet_fee_bps(env.clone());
+                let fee = checked_mul_div(env, losing_total, fee_bps as i128, BPS_DENOMINATOR);
+                ledger.outcome = outcome;
+                ledger.fee_collected = fee;
+                ledger.distributable = checked_sub(env, losing_total, fee);
+                ledger.unclaimed_winning_stake = winning_total;
+                ledger.unclaimed_profit = ledger.distributable;
+                ledger.outstanding = checked_sub(env, ledger.outstanding, fee);
+                Self::sub_locked(env, &ledger.token, fee);
+                Self::store_side_bet_ledger(env, &ledger);
+                if fee > 0 {
+                    token::Client::new(env, &ledger.token).transfer(
+                        &env.current_contract_address(),
+                        &Self::side_bet_fee_recipient(env),
+                        &fee,
+                    );
+                }
+            }
+            // Draws, refunds and results nobody backed return every stake without a fee.
+            _ => {
+                ledger.outcome = SideBetOutcome::Refund;
+                Self::store_side_bet_ledger(env, &ledger);
+            }
+        }
+
+        env.events().publish(
+            (symbol_short!("side_set"), game_code.clone()),
+            SideBetsSettledEvent {
+                game_code: game_code.clone(),
+                outcome: ledger.outcome,
+                fee_collected: ledger.fee_collected,
+            },
+        );
+    }
+
+    /// Pays out a pre-#459 `SidePool` with its original push-based semantics.
+    fn settle_legacy_side_pool(env: &Env, game_code: &String, m: &Match, winner: Option<&Address>) {
+        let pool_key = (Symbol::new(env, "side_p"), game_code.clone());
+        let Some(pool) = env.storage().persistent().get::<_, SidePool>(&pool_key) else {
+            return;
+        };
+        let total = checked_add(
+            env,
+            pool.total_player1_side_staked,
+            pool.total_player2_side_staked,
+        );
+        Self::sub_locked(env, &m.token, total);
+
+        let token_client = token::Client::new(env, &m.token);
+        let winning_staked = match winner {
+            Some(w) if *w == m.player1 => pool.total_player1_side_staked,
+            Some(_) => pool.total_player2_side_staked,
+            None => 0,
+        };
+        for bet in pool.bets.iter() {
+            let amount = match winner {
+                Some(w) if winning_staked > 0 => {
+                    if bet.predicted_winner != *w {
+                        continue;
+                    }
+                    checked_mul_div(env, bet.amount, total, winning_staked)
+                }
+                _ => bet.amount,
+            };
+            token_client.transfer(&env.current_contract_address(), &bet.spectator, &amount);
+        }
+        Self::bump_entry_ttl(env, &pool_key);
+    }
+
+    /// Retrieves the legacy (pre-#459) side bet pool for a match (Issue #35).
     ///
     /// # Arguments
     /// * `env` - Environment reference.
@@ -3403,14 +3816,6 @@ impl ChessterEscrow {
         };
 
         if is_canceled {
-            let pool_key = (Symbol::new(&env, "side_p"), game_code.clone());
-            let side_total =
-                if let Some(pool) = env.storage().persistent().get::<_, SidePool>(&pool_key) {
-                    pool.total_player1_side_staked + pool.total_player2_side_staked
-                } else {
-                    0
-                };
-
             Self::assert_balance_invariant(&env, &m.token);
             let token_client = token::Client::new(&env, &m.token);
             token_client.transfer(&env.current_contract_address(), &m.player1, &m.wager_amount);
@@ -3418,18 +3823,8 @@ impl ChessterEscrow {
                 token_client.transfer(&env.current_contract_address(), &p2, &m.wager_amount);
             }
 
-            if let Some(pool) = env.storage().persistent().get::<_, SidePool>(&pool_key) {
-                for bet in pool.bets.iter() {
-                    token_client.transfer(
-                        &env.current_contract_address(),
-                        &bet.spectator,
-                        &bet.amount,
-                    );
-                }
-                Self::bump_entry_ttl(&env, &pool_key);
-            }
-
-            Self::sub_locked(&env, &m.token, m.total_staked + side_total);
+            Self::sub_locked(&env, &m.token, m.total_staked);
+            Self::settle_side_bets(&env, &game_code, &m, None);
             Self::assert_balance_invariant(&env, &m.token);
 
             m.status = MatchStatus::Refunded;
@@ -3488,26 +3883,12 @@ impl ChessterEscrow {
             panic_with_error!(&env, EscrowError::AlreadyJoined);
         }
 
-        let pool_key = (Symbol::new(&env, "side_p"), game_code.clone());
-        let side_total =
-            if let Some(pool) = env.storage().persistent().get::<_, SidePool>(&pool_key) {
-                pool.total_player1_side_staked + pool.total_player2_side_staked
-            } else {
-                0
-            };
-
         Self::assert_balance_invariant(&env, &m.token);
         let token_client = token::Client::new(&env, &m.token);
         token_client.transfer(&env.current_contract_address(), &m.player1, &m.wager_amount);
 
-        if let Some(pool) = env.storage().persistent().get::<_, SidePool>(&pool_key) {
-            for bet in pool.bets.iter() {
-                token_client.transfer(&env.current_contract_address(), &bet.spectator, &bet.amount);
-            }
-            Self::bump_entry_ttl(&env, &pool_key);
-        }
-
-        Self::sub_locked(&env, &m.token, m.total_staked + side_total);
+        Self::sub_locked(&env, &m.token, m.total_staked);
+        Self::settle_side_bets(&env, &game_code, &m, None);
         Self::assert_balance_invariant(&env, &m.token);
 
         m.status = MatchStatus::Refunded;
@@ -3849,18 +4230,6 @@ impl ChessterEscrow {
     ) -> i128 {
         let token_client = token::Client::new(env, &m.token);
 
-        let pool_key = (Symbol::new(env, "side_p"), game_code.clone());
-        let pool = env.storage().persistent().get::<_, SidePool>(&pool_key);
-        let side_total = if let Some(ref p) = pool {
-            checked_add(
-                env,
-                p.total_player1_side_staked,
-                p.total_player2_side_staked,
-            )
-        } else {
-            0
-        };
-
         Self::assert_balance_invariant(env, &m.token);
 
         if let Some(w) = winner.clone() {
@@ -3886,7 +4255,7 @@ impl ChessterEscrow {
         env.storage().persistent().set(game_code, m);
         Self::bump_entry_ttl(env, game_code);
 
-        Self::sub_locked(env, &m.token, checked_add(env, m.total_staked, side_total));
+        Self::sub_locked(env, &m.token, m.total_staked);
         Self::remove_from_active_lists(env, game_code, m);
 
         // --- INTERACTIONS: external token transfers only after state is final. ---
@@ -3915,51 +4284,7 @@ impl ChessterEscrow {
             }
         }
 
-        if let Some(pool) = pool {
-            if let Some(w) = winner.clone() {
-                let winning_staked = if w == m.player1 {
-                    pool.total_player1_side_staked
-                } else {
-                    pool.total_player2_side_staked
-                };
-                let total_side_staked = checked_add(
-                    env,
-                    pool.total_player1_side_staked,
-                    pool.total_player2_side_staked,
-                );
-
-                if winning_staked > 0 {
-                    for bet in pool.bets.iter() {
-                        if bet.predicted_winner == w {
-                            let payout =
-                                checked_mul_div(env, bet.amount, total_side_staked, winning_staked);
-                            token_client.transfer(
-                                &env.current_contract_address(),
-                                &bet.spectator,
-                                &payout,
-                            );
-                        }
-                    }
-                } else {
-                    for bet in pool.bets.iter() {
-                        token_client.transfer(
-                            &env.current_contract_address(),
-                            &bet.spectator,
-                            &bet.amount,
-                        );
-                    }
-                }
-            } else {
-                for bet in pool.bets.iter() {
-                    token_client.transfer(
-                        &env.current_contract_address(),
-                        &bet.spectator,
-                        &bet.amount,
-                    );
-                }
-            }
-            Self::bump_entry_ttl(env, &pool_key);
-        }
+        Self::settle_side_bets(env, game_code, m, winner.as_ref());
 
         Self::assert_balance_invariant(env, &m.token);
 
@@ -4712,14 +5037,6 @@ impl ChessterEscrow {
     fn execute_refund(env: &Env, game_code: &String, m: &mut Match) {
         let token_client = token::Client::new(env, &m.token);
 
-        let pool_key = (Symbol::new(env, "side_p"), game_code.clone());
-        let side_total =
-            if let Some(pool) = env.storage().persistent().get::<_, SidePool>(&pool_key) {
-                pool.total_player1_side_staked + pool.total_player2_side_staked
-            } else {
-                0
-            };
-
         Self::assert_balance_invariant(env, &m.token);
 
         token_client.transfer(&env.current_contract_address(), &m.player1, &m.wager_amount);
@@ -4727,14 +5044,8 @@ impl ChessterEscrow {
             token_client.transfer(&env.current_contract_address(), &p2, &m.wager_amount);
         }
 
-        if let Some(pool) = env.storage().persistent().get::<_, SidePool>(&pool_key) {
-            for bet in pool.bets.iter() {
-                token_client.transfer(&env.current_contract_address(), &bet.spectator, &bet.amount);
-            }
-            Self::bump_entry_ttl(env, &pool_key);
-        }
-
-        Self::sub_locked(env, &m.token, m.total_staked + side_total);
+        Self::sub_locked(env, &m.token, m.total_staked);
+        Self::settle_side_bets(env, game_code, m, None);
         Self::assert_balance_invariant(env, &m.token);
 
         m.status = MatchStatus::Refunded;
@@ -4791,14 +5102,6 @@ impl ChessterEscrow {
     fn execute_emergency_refund(env: &Env, game_code: &String, m: &mut Match) {
         let token_client = token::Client::new(env, &m.token);
 
-        let pool_key = (Symbol::new(env, "side_p"), game_code.clone());
-        let side_total =
-            if let Some(pool) = env.storage().persistent().get::<_, SidePool>(&pool_key) {
-                pool.total_player1_side_staked + pool.total_player2_side_staked
-            } else {
-                0
-            };
-
         Self::assert_balance_invariant(env, &m.token);
 
         let p2 = m
@@ -4811,14 +5114,8 @@ impl ChessterEscrow {
         token_client.transfer(&env.current_contract_address(), &m.player1, &half_wager);
         token_client.transfer(&env.current_contract_address(), &p2, &remaining_half);
 
-        if let Some(pool) = env.storage().persistent().get::<_, SidePool>(&pool_key) {
-            for bet in pool.bets.iter() {
-                token_client.transfer(&env.current_contract_address(), &bet.spectator, &bet.amount);
-            }
-            Self::bump_entry_ttl(env, &pool_key);
-        }
-
-        Self::sub_locked(env, &m.token, m.total_staked + side_total);
+        Self::sub_locked(env, &m.token, m.total_staked);
+        Self::settle_side_bets(env, game_code, m, None);
         Self::assert_balance_invariant(env, &m.token);
 
         m.status = MatchStatus::EmergencyRefunded;
@@ -5025,6 +5322,83 @@ impl ChessterEscrow {
         Self::batch_resolve_matches(env, resolutions);
     }
 
+    /// Coordinator cancels up to `MAX_BATCH_TOURNAMENT_CANCELLATIONS` stalled or unplayed
+    /// matches of a tournament round and refunds every escrowed stake (Issue #458).
+    ///
+    /// The batch is atomic: every match is validated before any refund, and any invalid
+    /// entry (unknown, settled, disputed or non-tournament match, or a duplicate code)
+    /// reverts the whole call. A match belongs to the tournament when it uses the
+    /// tournament token and every joined player is a registered participant. Match
+    /// wagers are held separately from the buy-in prize pool, so `total_pool` is unchanged.
+    ///
+    /// # Arguments
+    /// * `env` - Environment reference.
+    /// * `tournament_id` - Tournament whose matches are cancelled.
+    /// * `game_codes` - Pending or Active matches to cancel (1 to 20).
+    ///
+    /// # Returns
+    /// * `u32` - Number of matches refunded.
+    pub fn batch_cancel_tournament_matches(
+        env: Env,
+        tournament_id: String,
+        game_codes: Vec<String>,
+    ) -> u32 {
+        let coordinator = Self::get_coordinator(env.clone());
+        coordinator.require_auth();
+        let _guard = ReentrancyGuard::new(&env);
+
+        let count = game_codes.len();
+        if count == 0 || count > MAX_BATCH_TOURNAMENT_CANCELLATIONS {
+            panic_with_error!(&env, EscrowError::InvalidBatchSize);
+        }
+
+        let tournament: TournamentPrizePool = env
+            .storage()
+            .persistent()
+            .get(&tournament_id)
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::InvalidTournament));
+        Self::bump_entry_ttl(&env, &tournament_id);
+
+        for game_code in game_codes.iter() {
+            let m = Self::load_match(&env, &game_code);
+            if m.status != MatchStatus::Pending && m.status != MatchStatus::Active {
+                panic_with_error!(&env, EscrowError::AlreadyResolvedOrRefunded);
+            }
+            Self::ensure_dispute_not_locked(&env, &game_code);
+            let players_registered = tournament.players.contains(&m.player1)
+                && m.player2
+                    .as_ref()
+                    .is_none_or(|p2| tournament.players.contains(p2));
+            if m.token != tournament.token || !players_registered {
+                panic_with_error!(&env, EscrowErrorExt::MatchNotInTournament);
+            }
+        }
+
+        // A repeated code fails here: its first refund already moved it out of Pending/Active.
+        for game_code in game_codes.iter() {
+            let mut m = Self::load_match(&env, &game_code);
+            if m.status != MatchStatus::Pending && m.status != MatchStatus::Active {
+                panic_with_error!(&env, EscrowError::AlreadyResolvedOrRefunded);
+            }
+            Self::execute_refund(&env, &game_code, &mut m);
+        }
+
+        env.events().publish(
+            (
+                symbol_short!("escrow"),
+                symbol_short!("t_cancel"),
+                tournament_id.clone(),
+            ),
+            TournamentMatchesCancelledEvent {
+                tournament_id,
+                refunded_count: count,
+                game_codes,
+                token: tournament.token,
+            },
+        );
+        count
+    }
+
     /// Cleans up settled or refunded matches older than 30 days (`STALE_MATCH_THRESHOLD_SECS`) from storage (Issue #41, #380).
     ///
     /// Callers should split larger cleanup sets into bounded invocations of up to `MAX_BATCH_GC_MATCHES`.
@@ -5083,6 +5457,17 @@ impl ChessterEscrow {
                 let pool_key = (Symbol::new(env, "side_p"), game_code.clone());
                 if env.storage().persistent().has(&pool_key) {
                     env.storage().persistent().remove(&pool_key);
+                }
+                // A side pool with unclaimed funds outlives its match so bettors can still claim.
+                let ledger_key = DataKey::SideBetPool(game_code.clone());
+                if let Some(ledger) = env
+                    .storage()
+                    .persistent()
+                    .get::<_, SideBetLedger>(&ledger_key)
+                {
+                    if ledger.outstanding == 0 {
+                        env.storage().persistent().remove(&ledger_key);
+                    }
                 }
                 return true;
             }

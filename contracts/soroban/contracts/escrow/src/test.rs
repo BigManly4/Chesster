@@ -7,7 +7,7 @@ use soroban_sdk::token::Client as TokenClient;
 use soroban_sdk::token::StellarAssetClient as TokenAdminClient;
 use soroban_sdk::{
     testutils::{storage::Persistent as _, Address as _, Events, Ledger},
-    vec, Address, Env, String,
+    vec, Address, Env, String, TryFromVal,
 };
 
 use proptest::{prelude::*, test_runner::Config as ProptestConfig};
@@ -263,19 +263,20 @@ fn test_spectator_side_pool_payout() {
     client.join_match(&game_code, &player2);
 
     // Spectator 1 bets 100 on Player 1
-    client.place_side_bet(&game_code, &spectator1, &player1, &100);
+    client.place_side_bet(&game_code, &spectator1, &player1, &token.address, &100);
     // Spectator 2 bets 100 on Player 2
-    client.place_side_bet(&game_code, &spectator2, &player2, &100);
+    client.place_side_bet(&game_code, &spectator2, &player2, &token.address, &100);
 
-    let side_pool = client.get_side_pool(&game_code);
-    assert_eq!(side_pool.total_player1_side_staked, 100);
-    assert_eq!(side_pool.total_player2_side_staked, 100);
-    assert_eq!(side_pool.bets.len(), 2);
+    let ledger = client.get_side_bet_ledger(&game_code).unwrap();
+    assert_eq!(ledger.total_white_bets, 100);
+    assert_eq!(ledger.total_black_bets, 100);
 
     // Resolve match with Player 1 winning
-    // Total side pool = 200. Winning side staked = 100.
-    // Spectator 1 gets (100 * 200) / 100 = 200.
+    // Total side pool = 200. Winning side staked = 100. No side-bet fee configured.
+    // Spectator 1 claims (100 * 200) / 100 = 200.
     client.resolve_match(&game_code, &Some(player1.clone()));
+    assert_eq!(client.claim_side_bet(&game_code, &spectator1), 200);
+    assert_eq!(client.claim_side_bet(&game_code, &spectator2), 0);
 
     assert_eq!(token.balance(&spectator1), 600); // 400 + 200 = 600
     assert_eq!(token.balance(&spectator2), 400); // 500 - 100 = 400
@@ -720,6 +721,309 @@ fn test_tournament_create_and_join() {
     let tournament = client.get_tournament(&tournament_id);
     assert_eq!(tournament.total_pool, 200);
     assert_eq!(tournament.players.len(), 2);
+}
+
+struct TournamentRound<'a> {
+    client: ChessterEscrowClient<'a>,
+    contract_id: Address,
+    coordinator: Address,
+    token: TokenClient<'a>,
+    token_admin_client: TokenAdminClient<'a>,
+    tournament_id: String,
+    players: alloc::vec::Vec<Address>,
+    outsider: Address,
+}
+
+/// Four registered players (buy-in 100) plus one non-participant, each funded with 1000.
+fn setup_tournament_round(env: &Env) -> TournamentRound<'_> {
+    env.mock_all_auths();
+    let coordinator = Address::generate(env);
+    let token_admin = Address::generate(env);
+    let (token, token_admin_client) = create_token_contract(env, &token_admin);
+    let contract_id = env.register(ChessterEscrow, ());
+    let client = ChessterEscrowClient::new(env, &contract_id);
+    client.init(&coordinator, &500);
+    client.add_supported_token(&token.address);
+
+    let tournament_id = String::from_str(env, "ROUND_TOURN");
+    client.create_tournament(&tournament_id, &100, &8, &2, &0, &token.address);
+
+    let players: alloc::vec::Vec<Address> = (0..4).map(|_| Address::generate(env)).collect();
+    let outsider = Address::generate(env);
+    for p in players.iter().chain(core::iter::once(&outsider)) {
+        token_admin_client.mint(p, &1000);
+        approve(env, &token, p, &contract_id, 1000);
+    }
+    for p in players.iter() {
+        client.join_tournament(&tournament_id, p);
+    }
+
+    TournamentRound {
+        client,
+        contract_id,
+        coordinator,
+        token,
+        token_admin_client,
+        tournament_id,
+        players,
+        outsider,
+    }
+}
+
+fn start_match(r: &TournamentRound, code: &str, p1: &Address, p2: Option<&Address>) -> String {
+    let game_code = String::from_str(&r.client.env, code);
+    r.client
+        .create_match(&game_code, p1, &r.token.address, &200);
+    if let Some(p2) = p2 {
+        r.client.join_match(&game_code, p2);
+    }
+    game_code
+}
+
+#[test]
+fn test_batch_cancel_tournament_matches_refunds_round_atomically() {
+    let env = Env::default();
+    let r = setup_tournament_round(&env);
+    let [a, b, c, d] = [&r.players[0], &r.players[1], &r.players[2], &r.players[3]];
+
+    let active = start_match(&r, "T_ACTIVE", a, Some(b));
+    let pending = start_match(&r, "T_PENDING", c, None);
+    let other = start_match(&r, "T_OTHER", d, None);
+    assert_eq!(r.token.balance(a), 700);
+    assert_eq!(r.token.balance(c), 700);
+    let pool_before = r.client.get_tournament(&r.tournament_id).total_pool;
+
+    let codes = vec![&env, active.clone(), pending.clone()];
+    let refunded = r
+        .client
+        .batch_cancel_tournament_matches(&r.tournament_id, &codes);
+    assert_eq!(refunded, 2);
+
+    // Coordinator authorization was required.
+    assert_eq!(env.auths()[0].0, r.coordinator);
+    let events = env.events().all();
+
+    assert_eq!(r.client.get_match(&active).status, MatchStatus::Refunded);
+    assert_eq!(r.client.get_match(&pending).status, MatchStatus::Refunded);
+    assert_eq!(r.client.get_match(&other).status, MatchStatus::Pending);
+    for p in [a, b, c] {
+        assert_eq!(r.token.balance(p), 900);
+    }
+    // Only buy-ins (4 x 100) and the untouched match remain escrowed.
+    assert_eq!(r.token.balance(&r.contract_id), 400 + 200);
+    assert_eq!(
+        r.client.get_tournament(&r.tournament_id).total_pool,
+        pool_before
+    );
+
+    let event = events
+        .iter()
+        .find(|(id, topics, _)| {
+            *id == r.contract_id
+                && topics.len() == 3
+                && Symbol::try_from_val(&env, &topics.get(1).unwrap())
+                    == Ok(symbol_short!("t_cancel"))
+        })
+        .expect("t_cancel event");
+    let payload = TournamentMatchesCancelledEvent::try_from_val(&env, &event.2).unwrap();
+    assert_eq!(
+        payload,
+        TournamentMatchesCancelledEvent {
+            tournament_id: r.tournament_id.clone(),
+            refunded_count: 2,
+            game_codes: codes,
+            token: r.token.address.clone(),
+        }
+    );
+}
+
+#[test]
+fn test_batch_cancel_tournament_matches_rejects_non_tournament_match_without_partial_refund() {
+    let env = Env::default();
+    let r = setup_tournament_round(&env);
+    let (a, b) = (&r.players[0], &r.players[1]);
+
+    let valid = start_match(&r, "T_VALID", a, Some(b));
+    let casual = start_match(&r, "T_CASUAL", &r.players[2], Some(&r.outsider));
+
+    let res = r.client.try_batch_cancel_tournament_matches(
+        &r.tournament_id,
+        &vec![&env, valid.clone(), casual.clone()],
+    );
+    assert_eq!(
+        res.unwrap_err(),
+        Ok(soroban_sdk::Error::from_contract_error(
+            EscrowErrorExt::MatchNotInTournament as u32
+        ))
+    );
+    assert_eq!(r.client.get_match(&valid).status, MatchStatus::Active);
+    assert_eq!(r.client.get_match(&casual).status, MatchStatus::Active);
+    assert_eq!(r.token.balance(a), 700);
+}
+
+#[test]
+fn test_batch_cancel_tournament_matches_rejects_match_in_other_token() {
+    let env = Env::default();
+    let r = setup_tournament_round(&env);
+    let (a, b) = (&r.players[0], &r.players[1]);
+
+    let (other_token, other_admin) = create_token_contract(&env, &Address::generate(&env));
+    for p in [a, b] {
+        other_admin.mint(p, &1000);
+        approve(&env, &other_token, p, &r.contract_id, 1000);
+    }
+    let code = String::from_str(&env, "T_OTHERTOK");
+    r.client.create_match(&code, a, &other_token.address, &200);
+    r.client.join_match(&code, b);
+
+    let res = r
+        .client
+        .try_batch_cancel_tournament_matches(&r.tournament_id, &vec![&env, code.clone()]);
+    assert_eq!(
+        res.unwrap_err(),
+        Ok(soroban_sdk::Error::from_contract_error(
+            EscrowErrorExt::MatchNotInTournament as u32
+        ))
+    );
+    assert_eq!(r.client.get_match(&code).status, MatchStatus::Active);
+}
+
+#[test]
+fn test_batch_cancel_tournament_matches_rejects_settled_and_duplicate_matches() {
+    let env = Env::default();
+    let r = setup_tournament_round(&env);
+    let (a, b) = (&r.players[0], &r.players[1]);
+
+    let settled = start_match(&r, "T_SETTLED", a, Some(b));
+    r.client.resolve_match(&settled, &Some(a.clone()));
+    let res = r
+        .client
+        .try_batch_cancel_tournament_matches(&r.tournament_id, &vec![&env, settled]);
+    assert_eq!(
+        res.unwrap_err(),
+        Ok(soroban_sdk::Error::from_contract_error(
+            EscrowError::AlreadyResolvedOrRefunded as u32
+        ))
+    );
+
+    let live = start_match(&r, "T_LIVE", &r.players[2], Some(&r.players[3]));
+    let res = r.client.try_batch_cancel_tournament_matches(
+        &r.tournament_id,
+        &vec![&env, live.clone(), live.clone()],
+    );
+    assert_eq!(
+        res.unwrap_err(),
+        Ok(soroban_sdk::Error::from_contract_error(
+            EscrowError::AlreadyResolvedOrRefunded as u32
+        ))
+    );
+    // The duplicate reverted the whole batch, including the first refund.
+    assert_eq!(r.client.get_match(&live).status, MatchStatus::Active);
+    assert_eq!(r.token.balance(&r.players[2]), 700);
+}
+
+#[test]
+fn test_batch_cancel_tournament_matches_respects_dispute_timelock() {
+    let env = Env::default();
+    let r = setup_tournament_round(&env);
+    let (a, b) = (&r.players[0], &r.players[1]);
+
+    let disputed = start_match(&r, "T_DISPUTE", a, Some(b));
+    r.client.raise_dispute(&disputed, a);
+
+    let res = r
+        .client
+        .try_batch_cancel_tournament_matches(&r.tournament_id, &vec![&env, disputed.clone()]);
+    assert_eq!(
+        res.unwrap_err(),
+        Ok(soroban_sdk::Error::from_contract_error(
+            EscrowError::DisputeTimeLockActive as u32
+        ))
+    );
+    assert_eq!(r.client.get_match(&disputed).status, MatchStatus::Active);
+}
+
+#[test]
+fn test_batch_cancel_tournament_matches_enforces_batch_bounds_and_tournament() {
+    let env = Env::default();
+    let r = setup_tournament_round(&env);
+
+    let empty = r
+        .client
+        .try_batch_cancel_tournament_matches(&r.tournament_id, &Vec::new(&env));
+    assert_eq!(
+        empty.unwrap_err(),
+        Ok(soroban_sdk::Error::from_contract_error(
+            EscrowError::InvalidBatchSize as u32
+        ))
+    );
+
+    let mut oversized = Vec::new(&env);
+    for _ in 0..=MAX_BATCH_TOURNAMENT_CANCELLATIONS {
+        oversized.push_back(String::from_str(&env, "T_ANY"));
+    }
+    let res = r
+        .client
+        .try_batch_cancel_tournament_matches(&r.tournament_id, &oversized);
+    assert_eq!(
+        res.unwrap_err(),
+        Ok(soroban_sdk::Error::from_contract_error(
+            EscrowError::InvalidBatchSize as u32
+        ))
+    );
+
+    let code = start_match(&r, "T_UNKNOWN", &r.players[0], Some(&r.players[1]));
+    let res = r.client.try_batch_cancel_tournament_matches(
+        &String::from_str(&env, "NO_SUCH_TOURN"),
+        &vec![&env, code],
+    );
+    assert_eq!(
+        res.unwrap_err(),
+        Ok(soroban_sdk::Error::from_contract_error(
+            EscrowError::InvalidTournament as u32
+        ))
+    );
+}
+
+#[test]
+fn test_batch_cancel_tournament_matches_accepts_maximum_batch() {
+    let env = Env::default();
+    let r = setup_tournament_round(&env);
+    let mut codes = Vec::new(&env);
+    let mut pairs = alloc::vec::Vec::new();
+    for i in 0..MAX_BATCH_TOURNAMENT_CANCELLATIONS {
+        // Fresh registered pairs keep each player under the 5-active-match cap.
+        let tid = String::from_str(&env, "BIG_TOURN");
+        if i == 0 {
+            r.client
+                .create_tournament(&tid, &1, &64, &2, &0, &r.token.address);
+        }
+        let p1 = Address::generate(&env);
+        let p2 = Address::generate(&env);
+        for p in [&p1, &p2] {
+            r.token_admin_client.mint(p, &1000);
+            approve(&env, &r.token, p, &r.contract_id, 1000);
+            r.client.join_tournament(&tid, p);
+        }
+        let mut code_buf = [0u8; 8];
+        code_buf[..2].copy_from_slice(b"T_");
+        code_buf[2] = b'A' + (i / 10) as u8;
+        code_buf[3] = b'0' + (i % 10) as u8;
+        let code = String::from_bytes(&env, &code_buf[..4]);
+        r.client.create_match(&code, &p1, &r.token.address, &200);
+        r.client.join_match(&code, &p2);
+        codes.push_back(code);
+        pairs.push((p1, p2));
+    }
+
+    let refunded = r
+        .client
+        .batch_cancel_tournament_matches(&String::from_str(&env, "BIG_TOURN"), &codes);
+    assert_eq!(refunded, MAX_BATCH_TOURNAMENT_CANCELLATIONS);
+    for (p1, p2) in pairs.iter() {
+        assert_eq!(r.token.balance(p1), 999);
+        assert_eq!(r.token.balance(p2), 999);
+    }
 }
 
 #[test]
@@ -1453,12 +1757,432 @@ fn test_forfeit_match_settles_side_pool() {
     client.join_match(&game_code, &player2);
 
     // Spectator bets on player2 (the eventual winner-by-forfeit).
-    client.place_side_bet(&game_code, &spectator, &player2, &100);
+    client.place_side_bet(&game_code, &spectator, &player2, &token.address, &100);
 
     client.forfeit_match(&game_code, &player1);
 
     // Sole bettor on the winning side gets their stake back (no other side stakes).
+    assert_eq!(client.claim_side_bet(&game_code, &spectator), 100);
     assert_eq!(token.balance(&spectator), 500);
+}
+
+// ---------------------------------------------------------------------------
+// Issue #459 — Spectator side-bet pool settlement
+// ---------------------------------------------------------------------------
+
+struct SideBetMatch<'a> {
+    env: &'a Env,
+    client: ChessterEscrowClient<'a>,
+    contract_id: Address,
+    token: TokenClient<'a>,
+    token_admin_client: TokenAdminClient<'a>,
+    white: Address,
+    black: Address,
+    treasury: Address,
+    game_code: String,
+}
+
+impl<'a> SideBetMatch<'a> {
+    fn new(env: &'a Env) -> Self {
+        env.mock_all_auths();
+        let coordinator = Address::generate(env);
+        let token_admin = Address::generate(env);
+        let (token, token_admin_client) = create_token_contract(env, &token_admin);
+        let contract_id = env.register(ChessterEscrow, ());
+        let client = ChessterEscrowClient::new(env, &contract_id);
+        // No match rake, so the treasury balance measures side-bet fees alone.
+        client.init(&coordinator, &0);
+        client.add_whitelisted_token(&token.address);
+        let treasury = Address::generate(env);
+        client.set_treasury_vault(&treasury);
+
+        let white = Address::generate(env);
+        let black = Address::generate(env);
+        for p in [&white, &black] {
+            token_admin_client.mint(p, &1_000);
+            approve(env, &token, p, &contract_id, 1_000);
+        }
+        let game_code = String::from_str(env, "SIDE_POOL");
+        client.create_match(&game_code, &white, &token.address, &100);
+        client.join_match(&game_code, &black);
+
+        SideBetMatch {
+            env,
+            client,
+            contract_id,
+            token,
+            token_admin_client,
+            white,
+            black,
+            treasury,
+            game_code,
+        }
+    }
+
+    fn bettor(&self, funds: i128) -> Address {
+        let bettor = Address::generate(self.env);
+        self.token_admin_client.mint(&bettor, &funds);
+        approve(self.env, &self.token, &bettor, &self.contract_id, funds);
+        bettor
+    }
+
+    fn bet(&self, bettor: &Address, on: &Address, amount: i128) {
+        self.client
+            .place_side_bet(&self.game_code, bettor, on, &self.token.address, &amount);
+    }
+
+    fn claim(&self, bettor: &Address) -> i128 {
+        self.client.claim_side_bet(&self.game_code, bettor)
+    }
+}
+
+fn contract_err(code: u32) -> soroban_sdk::Error {
+    soroban_sdk::Error::from_contract_error(code)
+}
+
+#[test]
+fn test_spectator_side_pool_isolates_white_and_black_stakes() {
+    let env = Env::default();
+    let s = SideBetMatch::new(&env);
+    let (a, b, c) = (s.bettor(1_000), s.bettor(1_000), s.bettor(1_000));
+
+    s.bet(&a, &s.white, 100);
+    s.bet(&a, &s.white, 50);
+    s.bet(&a, &s.black, 30);
+    s.bet(&b, &s.white, 200);
+    s.bet(&c, &s.black, 70);
+
+    let ledger = s.client.get_side_bet_ledger(&s.game_code).unwrap();
+    assert_eq!(ledger.total_white_bets, 350);
+    assert_eq!(ledger.total_black_bets, 100);
+    assert_eq!(ledger.outcome, SideBetOutcome::Open);
+    assert_eq!(ledger.outstanding, 450);
+    let stake = |who: &Address, color| s.client.get_side_bet_stake(&s.game_code, who, &color);
+    assert_eq!(stake(&a, PlayerColor::White), 150);
+    assert_eq!(stake(&a, PlayerColor::Black), 30);
+    assert_eq!(stake(&c, PlayerColor::White), 0);
+    // Players' wagers (200) plus all side stakes stay escrowed and segregated per side.
+    assert_eq!(s.client.get_escrowed_balance(&s.token.address), 650);
+}
+
+#[test]
+fn test_spectator_side_pool_pays_multiple_winners_proportionally_with_fee() {
+    let env = Env::default();
+    let s = SideBetMatch::new(&env);
+    s.client.set_side_bet_fee_bps(&250);
+    let (a, b, c, d) = (
+        s.bettor(1_000),
+        s.bettor(1_000),
+        s.bettor(1_000),
+        s.bettor(1_000),
+    );
+
+    s.bet(&a, &s.white, 300);
+    s.bet(&b, &s.white, 100);
+    s.bet(&c, &s.black, 200);
+    s.bet(&d, &s.black, 100);
+
+    s.client.resolve_match(&s.game_code, &Some(s.white.clone()));
+
+    // Losing pool 300; fee = floor(300 * 2.5%) = 7 goes to the treasury at settlement.
+    let ledger = s.client.get_side_bet_ledger(&s.game_code).unwrap();
+    assert_eq!(ledger.outcome, SideBetOutcome::WhiteWon);
+    assert_eq!(ledger.fee_collected, 7);
+    assert_eq!(ledger.distributable, 293);
+    assert_eq!(s.token.balance(&s.treasury), 7);
+
+    // a: 300 + floor(300 * 293 / 400) = 300 + 219; b: 100 + floor(100 * 293 / 400) = 100 + 73.
+    assert_eq!(s.claim(&a), 519);
+    assert_eq!(s.claim(&c), 0);
+    assert_eq!(s.claim(&b), 173);
+    assert_eq!(s.claim(&d), 0);
+
+    // The last winning claim routed the 1-stroop rounding remainder to the treasury.
+    assert_eq!(s.token.balance(&s.treasury), 8);
+    assert_eq!(519 + 173 + 8, 300 + 100 + 200 + 100);
+    assert_eq!(
+        s.client
+            .get_side_bet_ledger(&s.game_code)
+            .unwrap()
+            .outstanding,
+        0
+    );
+    assert_eq!(s.client.get_escrowed_balance(&s.token.address), 0);
+}
+
+#[test]
+fn test_spectator_side_pool_draw_refunds_every_stake_without_fee() {
+    let env = Env::default();
+    let s = SideBetMatch::new(&env);
+    s.client.set_side_bet_fee_bps(&500);
+    let (a, b) = (s.bettor(1_000), s.bettor(1_000));
+    s.bet(&a, &s.white, 333);
+    s.bet(&a, &s.black, 1);
+    s.bet(&b, &s.black, 667);
+
+    s.client.resolve_match(&s.game_code, &None);
+
+    let ledger = s.client.get_side_bet_ledger(&s.game_code).unwrap();
+    assert_eq!(ledger.outcome, SideBetOutcome::Refund);
+    assert_eq!(ledger.fee_collected, 0);
+    assert_eq!(s.claim(&a), 334);
+    assert_eq!(s.claim(&b), 667);
+    assert_eq!(s.token.balance(&a), 1_000);
+    assert_eq!(s.token.balance(&b), 1_000);
+    assert_eq!(s.token.balance(&s.treasury), 0);
+}
+
+#[test]
+fn test_spectator_side_pool_refunds_when_nobody_backed_the_winner() {
+    let env = Env::default();
+    let s = SideBetMatch::new(&env);
+    s.client.set_side_bet_fee_bps(&500);
+    let a = s.bettor(1_000);
+    s.bet(&a, &s.white, 400);
+
+    s.client.resolve_match(&s.game_code, &Some(s.black.clone()));
+
+    assert_eq!(
+        s.client.get_side_bet_ledger(&s.game_code).unwrap().outcome,
+        SideBetOutcome::Refund
+    );
+    assert_eq!(s.claim(&a), 400);
+    assert_eq!(s.token.balance(&s.treasury), 0);
+}
+
+#[test]
+fn test_spectator_side_pool_refunds_on_match_cancellation() {
+    let env = Env::default();
+    let s = SideBetMatch::new(&env);
+    s.client.set_side_bet_fee_bps(&500);
+    let a = s.bettor(1_000);
+    s.bet(&a, &s.black, 250);
+
+    s.client.request_cancellation(&s.game_code, &s.white);
+    s.client.request_cancellation(&s.game_code, &s.black);
+
+    assert_eq!(
+        s.client.get_match(&s.game_code).status,
+        MatchStatus::Refunded
+    );
+    assert_eq!(s.claim(&a), 250);
+    assert_eq!(s.client.get_escrowed_balance(&s.token.address), 0);
+}
+
+#[test]
+fn test_spectator_side_pool_rejects_invalid_bets() {
+    let env = Env::default();
+    let s = SideBetMatch::new(&env);
+    let a = s.bettor(1_000);
+    let expect_err = |res: Result<
+        Result<(), soroban_sdk::ConversionError>,
+        Result<soroban_sdk::Error, soroban_sdk::InvokeError>,
+    >,
+                      code: u32| {
+        assert_eq!(res.unwrap_err(), Ok(contract_err(code)));
+    };
+
+    let (other_token, other_admin) = create_token_contract(&env, &Address::generate(&env));
+    other_admin.mint(&a, &1_000);
+    expect_err(
+        s.client
+            .try_place_side_bet(&s.game_code, &a, &s.white, &other_token.address, &10),
+        EscrowErrorExt::SideBetTokenMismatch as u32,
+    );
+    expect_err(
+        s.client
+            .try_place_side_bet(&s.game_code, &s.white, &s.black, &s.token.address, &10),
+        EscrowError::Unauthorized as u32,
+    );
+    expect_err(
+        s.client
+            .try_place_side_bet(&s.game_code, &a, &a, &s.token.address, &10),
+        EscrowError::InvalidWinner as u32,
+    );
+    s.client.set_wager_limits(&20, &500);
+    expect_err(
+        s.client
+            .try_place_side_bet(&s.game_code, &a, &s.white, &s.token.address, &19),
+        EscrowError::WagerBelowMinimum as u32,
+    );
+    expect_err(
+        s.client
+            .try_place_side_bet(&s.game_code, &a, &s.white, &s.token.address, &501),
+        EscrowError::WagerAboveMaximum as u32,
+    );
+
+    s.bet(&a, &s.white, 20);
+    s.client.close_side_betting(&s.game_code);
+    expect_err(
+        s.client
+            .try_place_side_bet(&s.game_code, &a, &s.white, &s.token.address, &20),
+        EscrowError::SideBetClosed as u32,
+    );
+
+    s.client.resolve_match(&s.game_code, &Some(s.white.clone()));
+    expect_err(
+        s.client
+            .try_place_side_bet(&s.game_code, &a, &s.white, &s.token.address, &20),
+        EscrowError::SideBetClosed as u32,
+    );
+    assert_eq!(s.claim(&a), 20);
+}
+
+#[test]
+fn test_spectator_side_pool_claim_guards() {
+    let env = Env::default();
+    let s = SideBetMatch::new(&env);
+    let (a, stranger) = (s.bettor(1_000), s.bettor(1_000));
+    s.bet(&a, &s.white, 100);
+
+    assert_eq!(
+        s.client.try_claim_side_bet(&s.game_code, &a).unwrap_err(),
+        Ok(contract_err(EscrowErrorExt::SideBetsNotSettled as u32))
+    );
+
+    s.client.resolve_match(&s.game_code, &Some(s.white.clone()));
+    assert_eq!(s.claim(&a), 100);
+    assert_eq!(
+        s.client.try_claim_side_bet(&s.game_code, &a).unwrap_err(),
+        Ok(contract_err(EscrowError::SideBetNotFound as u32))
+    );
+    assert_eq!(
+        s.client
+            .try_claim_side_bet(&s.game_code, &stranger)
+            .unwrap_err(),
+        Ok(contract_err(EscrowError::SideBetNotFound as u32))
+    );
+    assert_eq!(
+        s.client
+            .try_claim_side_bet(&String::from_str(&env, "NO_POOL"), &a)
+            .unwrap_err(),
+        Ok(contract_err(EscrowError::SideBetNotFound as u32))
+    );
+}
+
+#[test]
+fn test_spectator_side_pool_fee_is_bounded() {
+    let env = Env::default();
+    let s = SideBetMatch::new(&env);
+    assert_eq!(s.client.get_side_bet_fee_bps(), 0);
+    s.client.set_side_bet_fee_bps(&MAX_SIDE_BET_FEE_BPS);
+    assert_eq!(s.client.get_side_bet_fee_bps(), MAX_SIDE_BET_FEE_BPS);
+    assert_eq!(
+        s.client
+            .try_set_side_bet_fee_bps(&(MAX_SIDE_BET_FEE_BPS + 1))
+            .unwrap_err(),
+        Ok(contract_err(EscrowError::InvalidWager as u32))
+    );
+}
+
+#[test]
+fn test_spectator_side_pool_survives_match_gc_until_claimed() {
+    let env = Env::default();
+    let s = SideBetMatch::new(&env);
+    let (a, b) = (s.bettor(1_000), s.bettor(1_000));
+    s.bet(&a, &s.white, 100);
+    s.bet(&b, &s.black, 100);
+    s.client.resolve_match(&s.game_code, &Some(s.black.clone()));
+
+    env.ledger()
+        .with_mut(|l| l.timestamp += STALE_MATCH_THRESHOLD_SECS + 1);
+    assert!(s.client.gc_stale_match(&s.game_code));
+
+    // b is still owed funds, so the side pool outlives the match record.
+    assert!(s.client.get_side_bet_ledger(&s.game_code).is_some());
+    assert_eq!(s.claim(&b), 200);
+    assert_eq!(s.claim(&a), 0);
+}
+
+#[test]
+fn test_spectator_side_pool_settles_legacy_pools_after_upgrade() {
+    let env = Env::default();
+    let s = SideBetMatch::new(&env);
+    let (a, b) = (Address::generate(&env), Address::generate(&env));
+
+    // A pre-#459 pool written by the old contract version, backed by escrowed tokens.
+    s.token_admin_client.mint(&s.contract_id, &300);
+    env.as_contract(&s.contract_id, || {
+        let pool = SidePool {
+            game_code: s.game_code.clone(),
+            total_player1_side_staked: 200,
+            total_player2_side_staked: 100,
+            bets: vec![
+                &env,
+                SideBet {
+                    spectator: a.clone(),
+                    predicted_winner: s.white.clone(),
+                    amount: 200,
+                },
+                SideBet {
+                    spectator: b.clone(),
+                    predicted_winner: s.black.clone(),
+                    amount: 100,
+                },
+            ],
+        };
+        env.storage()
+            .persistent()
+            .set(&(Symbol::new(&env, "side_p"), s.game_code.clone()), &pool);
+        ChessterEscrow::add_locked(&env, &s.token.address, 300);
+    });
+
+    s.client.resolve_match(&s.game_code, &Some(s.white.clone()));
+
+    // Legacy semantics: winners are paid immediately, (200 * 300) / 200 = 300.
+    assert_eq!(s.token.balance(&a), 300);
+    assert_eq!(s.token.balance(&b), 0);
+    assert_eq!(s.client.get_escrowed_balance(&s.token.address), 0);
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(48))]
+
+    #[test]
+    fn test_spectator_side_pool_conserves_every_stroop(
+        bets in prop::collection::vec((1i128..1_000_000i128, any::<bool>()), 1..8),
+        fee_bps in 0u32..=MAX_SIDE_BET_FEE_BPS,
+        result in 0u8..3,
+    ) {
+        let env = Env::default();
+        let s = SideBetMatch::new(&env);
+        s.client.set_side_bet_fee_bps(&fee_bps);
+
+        let bettors: alloc::vec::Vec<(Address, i128, bool)> = bets
+            .iter()
+            .map(|(amount, on_white)| {
+                let bettor = s.bettor(*amount);
+                let side = if *on_white { &s.white } else { &s.black };
+                s.bet(&bettor, side, *amount);
+                (bettor, *amount, *on_white)
+            })
+            .collect();
+        let total: i128 = bets.iter().map(|(amount, _)| amount).sum();
+        let winner = match result {
+            0 => Some(s.white.clone()),
+            1 => Some(s.black.clone()),
+            _ => None,
+        };
+        s.client.resolve_match(&s.game_code, &winner);
+
+        let mut paid = 0i128;
+        for (bettor, stake, on_white) in bettors.iter() {
+            let payout = s.claim(bettor);
+            let backed_winner = match result {
+                0 => *on_white,
+                1 => !*on_white,
+                _ => true,
+            };
+            if backed_winner {
+                prop_assert!(payout >= *stake);
+            }
+            paid += payout;
+        }
+
+        prop_assert_eq!(paid + s.token.balance(&s.treasury), total);
+        prop_assert_eq!(s.client.get_escrowed_balance(&s.token.address), 0);
+        prop_assert_eq!(s.client.get_side_bet_ledger(&s.game_code).unwrap().outstanding, 0);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2359,11 +3083,14 @@ fn test_balance_invariant_escrowed_tracking() {
     let spectator = Address::generate(&env);
     token_admin_client.mint(&spectator, &1000);
     approve(&env, &token, &spectator, &contract_id, 1000);
-    client.place_side_bet(&gc, &spectator, &p1, &50);
+    client.place_side_bet(&gc, &spectator, &p1, &token.address, &50);
     assert_eq!(client.get_escrowed_balance(&token.address), 250);
 
-    // Resolution releases all escrowed funds
+    // Resolution releases the match wagers; the unbacked-winner side pool is refunded
+    // on claim, which releases the rest.
     client.resolve_match(&gc, &Some(p2.clone()));
+    assert_eq!(client.get_escrowed_balance(&token.address), 50);
+    assert_eq!(client.claim_side_bet(&gc, &spectator), 50);
     assert_eq!(client.get_escrowed_balance(&token.address), 0);
 }
 
@@ -4192,19 +4919,20 @@ mod extended_tests {
         client.join_match(&game_code, &player2);
 
         // Spectator 1 bets 100 on Player 1
-        client.place_side_bet(&game_code, &spectator1, &player1, &100);
+        client.place_side_bet(&game_code, &spectator1, &player1, &token.address, &100);
         // Spectator 2 bets 100 on Player 2
-        client.place_side_bet(&game_code, &spectator2, &player2, &100);
+        client.place_side_bet(&game_code, &spectator2, &player2, &token.address, &100);
 
-        let side_pool = client.get_side_pool(&game_code);
-        assert_eq!(side_pool.total_player1_side_staked, 100);
-        assert_eq!(side_pool.total_player2_side_staked, 100);
-        assert_eq!(side_pool.bets.len(), 2);
+        let ledger = client.get_side_bet_ledger(&game_code).unwrap();
+        assert_eq!(ledger.total_white_bets, 100);
+        assert_eq!(ledger.total_black_bets, 100);
 
         // Resolve match with Player 1 winning
-        // Total side pool = 200. Winning side staked = 100.
-        // Spectator 1 gets (100 * 200) / 100 = 200.
+        // Total side pool = 200. Winning side staked = 100. No side-bet fee configured.
+        // Spectator 1 claims (100 * 200) / 100 = 200.
         client.resolve_match(&game_code, &Some(player1.clone()));
+        assert_eq!(client.claim_side_bet(&game_code, &spectator1), 200);
+        assert_eq!(client.claim_side_bet(&game_code, &spectator2), 0);
 
         assert_eq!(token.balance(&spectator1), 600); // 400 + 200 = 600
         assert_eq!(token.balance(&spectator2), 400); // 500 - 100 = 400
@@ -5392,11 +6120,12 @@ mod extended_tests {
         client.join_match(&game_code, &player2);
 
         // Spectator bets on player2 (the eventual winner-by-forfeit).
-        client.place_side_bet(&game_code, &spectator, &player2, &100);
+        client.place_side_bet(&game_code, &spectator, &player2, &token.address, &100);
 
         client.forfeit_match(&game_code, &player1);
 
         // Sole bettor on the winning side gets their stake back (no other side stakes).
+        assert_eq!(client.claim_side_bet(&game_code, &spectator), 100);
         assert_eq!(token.balance(&spectator), 500);
     }
 
@@ -6114,11 +6843,14 @@ mod extended_tests {
         let spectator = Address::generate(&env);
         token_admin_client.mint(&spectator, &1000);
         approve(&env, &token, &spectator, &contract_id, 1000);
-        client.place_side_bet(&gc, &spectator, &p1, &50);
+        client.place_side_bet(&gc, &spectator, &p1, &token.address, &50);
         assert_eq!(client.get_escrowed_balance(&token.address), 250);
 
-        // Resolution releases all escrowed funds
+        // Resolution releases the match wagers; the unbacked-winner side pool is refunded
+        // on claim, which releases the rest.
         client.resolve_match(&gc, &Some(p2.clone()));
+        assert_eq!(client.get_escrowed_balance(&token.address), 50);
+        assert_eq!(client.claim_side_bet(&gc, &spectator), 50);
         assert_eq!(client.get_escrowed_balance(&token.address), 0);
     }
 

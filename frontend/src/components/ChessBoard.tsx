@@ -86,6 +86,52 @@ const PIECE_SYMBOLS: Record<string, string> = {
   p: "♟",
 };
 
+// Piece set configurations for different visual styles
+const PIECE_SET_SYMBOLS: Record<"classic" | "neo" | "wood", Record<string, string>> = {
+  classic: {
+    K: "♔",
+    Q: "♕",
+    R: "♖",
+    B: "♗",
+    N: "♘",
+    P: "♙",
+    k: "♚",
+    q: "♛",
+    r: "♜",
+    b: "♝",
+    n: "♞",
+    p: "♟",
+  },
+  neo: {
+    K: "♔",
+    Q: "♕",
+    R: "♖",
+    B: "♗",
+    N: "♘",
+    P: "♙",
+    k: "♚",
+    q: "♛",
+    r: "♜",
+    b: "♝",
+    n: "♞",
+    p: "♟",
+  },
+  wood: {
+    K: "♔",
+    Q: "♕",
+    R: "♖",
+    B: "♗",
+    N: "♘",
+    P: "♙",
+    k: "♚",
+    q: "♛",
+    r: "♜",
+    b: "♝",
+    n: "♞",
+    p: "♟",
+  },
+};
+
 const WHITE_PIECE_STYLE: React.CSSProperties = {
   color: "#ffffff",
   textShadow: "-1.5px -1.5px 0 #000, 1.5px -1.5px 0 #000, -1.5px 1.5px 0 #000, 1.5px 1.5px 0 #000",
@@ -279,8 +325,9 @@ function PlayerAvatar({ color }: { color: "white" | "black" }) {
   );
 }
 
-function CapturedIcons({ captured }: { captured: string[] }) {
+function CapturedIcons({ captured, pieceSet }: { captured: string[]; pieceSet: "classic" | "neo" | "wood" }) {
   if (captured.length === 0) return null;
+  const symbols = PIECE_SET_SYMBOLS[pieceSet];
   return (
     <div className="flex overflow-hidden shrink-0" style={{ maxWidth: "6rem" }}>
       {captured.map((p, i) => (
@@ -292,7 +339,7 @@ function CapturedIcons({ captured }: { captured: string[] }) {
             ...(p === p.toUpperCase() ? WHITE_PIECE_STYLE : BLACK_PIECE_STYLE),
           }}
         >
-          {PIECE_SYMBOLS[p]}
+          {symbols[p]}
         </span>
       ))}
     </div>
@@ -335,6 +382,7 @@ function ChessBoardInner() {
     loadMoveHistory,
     isBlindfoldMode,
     isStreamerMode,
+    pieceSet,
   } = useGameStore();
   const { addToast, removeToast } = useToastStore();
   const navigate = useNavigate();
@@ -1867,6 +1915,7 @@ function ChessBoardInner() {
               />
               <CapturedIcons
                 captured={opponentColor === "white" ? capturedByWhite : capturedByBlack}
+                pieceSet={pieceSet}
               />
             </div>
             {status === "active" && isMyTurn && (
@@ -2124,7 +2173,7 @@ function ChessBoardInner() {
                                   } as React.CSSProperties
                                 }
                               >
-                                {PIECE_SYMBOLS[piece]}
+                                {PIECE_SET_SYMBOLS[pieceSet][piece]}
                               </span>
                             )}
                           </>
@@ -2225,7 +2274,7 @@ function ChessBoardInner() {
                   } as React.CSSProperties
                 }
               >
-                {PIECE_SYMBOLS[dragPiece.piece]}
+                {PIECE_SET_SYMBOLS[pieceSet][dragPiece.piece]}
               </span>
             )}
 
@@ -2277,6 +2326,7 @@ function ChessBoardInner() {
               />
               <CapturedIcons
                 captured={playerColor === "white" ? capturedByWhite : capturedByBlack}
+                pieceSet={pieceSet}
               />
             </div>
             <div className="flex items-center gap-2 shrink-0">

@@ -1,7 +1,7 @@
 const os = require("os");
 const path = require("path");
 const { threadId: mainThreadId } = require("worker_threads");
-const { BotWorkerPool } = require("../services/botService");
+const { StockfishPool: BotWorkerPool } = require("../services/stockfishPool");
 
 const TEST_WORKER = path.join(__dirname, "fixtures", "poolTestWorker.js");
 const BROKEN_WORKER = path.join(__dirname, "fixtures", "brokenWorker.js");
