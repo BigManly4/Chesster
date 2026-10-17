@@ -679,11 +679,14 @@ app.set("io", io);
 timerService.init(io);
 // Stop the auth challenge sweep timer on shutdown so the event loop exits cleanly.
 const authService = require("./services/authService");
+const botService = require("./services/botService");
 if (require.main === module) {
 	for (const signal of ["SIGTERM", "SIGINT"]) {
-		process.on(signal, () => {
+		process.on(signal, async () => {
 			try {
 				authService.stop();
+				// Terminate bot workers and kill their Stockfish processes so none are orphaned.
+				await botService.shutdown();
 			} finally {
 				process.exit(0);
 			}
