@@ -24,8 +24,9 @@ proptest! {
         outcome in 0u8..3,
     ) {
         let total_pool = wager * 2;
+        let env = Env::default();
         let (winner_payout, treasury_fee) =
-            ChessterEscrow::calculate_tournament_rake(total_pool, fee_bps);
+            ChessterEscrow::calculate_tournament_rake(&env, total_pool, fee_bps);
 
         match outcome {
             0 => {
@@ -1769,6 +1770,133 @@ fn test_token_wager_limits_config() {
     assert_eq!(limits.min_wager, 1);
 }
 
+fn setup_token_limit_test<'a>(
+    env: &'a Env,
+) -> (ChessterEscrowClient<'a>, Address, TokenClient<'a>, Address) {
+    env.mock_all_auths();
+    let coordinator = Address::generate(env);
+    let token_admin = Address::generate(env);
+    let (token, token_admin_client) = create_token_contract(env, &token_admin);
+    let contract_id = env.register(ChessterEscrow, ());
+    let client = ChessterEscrowClient::new(env, &contract_id);
+    client.init(&coordinator, &500);
+
+    let player = Address::generate(env);
+    token_admin_client.mint(&player, &1_000_000);
+    approve(env, &token, &player, &contract_id, 1_000_000);
+    (client, contract_id, token, player)
+}
+
+fn contract_error(code: u32) -> soroban_sdk::Error {
+    soroban_sdk::Error::from_contract_error(code)
+}
+
+#[test]
+fn test_create_match_rejects_wager_below_token_specific_min() {
+    let env = Env::default();
+    let (client, _, token, player) = setup_token_limit_test(&env);
+    client.set_wager_limits(&1, &1_000_000);
+    client.set_token_wager_limits(&token.address, &1_000, &100_000);
+
+    let res = client.try_create_match(
+        &String::from_str(&env, "DUST01"),
+        &player,
+        &token.address,
+        &999,
+    );
+    assert_eq!(
+        res.unwrap_err(),
+        Ok(contract_error(
+            EscrowErrorExt::WagerBelowTokenMinimum as u32
+        ))
+    );
+    assert!(client
+        .try_get_match(&String::from_str(&env, "DUST01"))
+        .is_err());
+}
+
+#[test]
+fn test_create_match_enforces_token_specific_wager_limits() {
+    let env = Env::default();
+    let (client, _, token, player) = setup_token_limit_test(&env);
+    client.set_wager_limits(&1, &1_000_000);
+    client.set_token_wager_limits(&token.address, &1_000, &100_000);
+
+    let at_min = String::from_str(&env, "TOKMIN");
+    client.create_match(&at_min, &player, &token.address, &1_000);
+    assert_eq!(client.get_match(&at_min).wager_amount, 1_000);
+
+    let res = client.try_create_match(
+        &String::from_str(&env, "TOKMAX"),
+        &player,
+        &token.address,
+        &100_001,
+    );
+    assert_eq!(
+        res.unwrap_err(),
+        Ok(contract_error(EscrowError::WagerAboveMaximum as u32))
+    );
+}
+
+#[test]
+fn test_create_match_token_min_still_enforced_with_asset_config() {
+    let env = Env::default();
+    let (client, _, token, player) = setup_token_limit_test(&env);
+    client.set_asset_config(
+        &token.address,
+        &AssetConfig {
+            min_wager: 1,
+            max_wager: 1_000_000,
+            fee_bps: 250,
+            decimals: 7,
+            enabled: true,
+        },
+    );
+    client.set_token_wager_limits(&token.address, &1_000, &100_000);
+
+    let res = client.try_create_match(
+        &String::from_str(&env, "ACDUST"),
+        &player,
+        &token.address,
+        &10,
+    );
+    assert_eq!(
+        res.unwrap_err(),
+        Ok(contract_error(
+            EscrowErrorExt::WagerBelowTokenMinimum as u32
+        ))
+    );
+
+    let ok = String::from_str(&env, "ACOK01");
+    client.create_match(&ok, &player, &token.address, &1_000);
+    assert_eq!(client.get_match(&ok).wager_amount, 1_000);
+}
+
+#[test]
+fn test_create_match_falls_back_to_global_limits_without_token_limits() {
+    let env = Env::default();
+    let (client, _, token, player) = setup_token_limit_test(&env);
+    client.set_wager_limits(&500, &1_000_000);
+
+    let res = client.try_create_match(
+        &String::from_str(&env, "GLOB01"),
+        &player,
+        &token.address,
+        &499,
+    );
+    assert_eq!(
+        res.unwrap_err(),
+        Ok(contract_error(EscrowError::WagerBelowMinimum as u32))
+    );
+
+    // Removing token limits restores the global fallback.
+    client.set_token_wager_limits(&token.address, &10, &1_000);
+    client.remove_token_wager_limits(&token.address);
+    let ok = String::from_str(&env, "GLOB02");
+    client.create_match(&ok, &player, &token.address, &500);
+    assert_eq!(client.get_match(&ok).wager_amount, 500);
+}
+
 #[test]
 fn test_asset_config_happy_path() {
     let env = Env::default();
@@ -1868,7 +1996,10 @@ fn test_asset_decimal_normalization_for_six_and_eighteen_decimal_tokens() {
         let expected_fee = if decimals == 6 { 100_000 } else { wager / 10 };
         assert_eq!(token.balance(&coordinator), expected_fee);
         assert_eq!(token.balance(&contract_id), 0);
-        assert_eq!(client.get_asset_config(&token.address).unwrap().decimals, decimals);
+        assert_eq!(
+            client.get_asset_config(&token.address).unwrap().decimals,
+            decimals
+        );
     }
 }
 
@@ -1893,7 +2024,10 @@ fn test_batch_refund_expired_success() {
     client.create_match_with_duration(&second, &player1, &token.address, &100, &120);
     env.ledger().set_timestamp(env.ledger().timestamp() + 121);
 
-    assert_eq!(client.batch_refund_expired(&vec![&env, first.clone(), second.clone()]), 2);
+    assert_eq!(
+        client.batch_refund_expired(&vec![&env, first.clone(), second.clone()]),
+        2
+    );
     assert_eq!(token.balance(&player1), 200);
     assert_eq!(token.balance(&contract_id), 0);
     assert_eq!(client.get_match(&first).status, MatchStatus::Refunded);
@@ -1922,9 +2056,7 @@ fn test_batch_refund_expired_rejects_invalid_batches_atomically() {
     env.ledger().set_timestamp(env.ledger().timestamp() + 121);
     client.create_match_with_duration(&not_expired, &player1, &token.address, &100, &120);
 
-    assert!(client
-        .try_batch_refund_expired(&Vec::new(&env))
-        .is_err());
+    assert!(client.try_batch_refund_expired(&Vec::new(&env)).is_err());
     let mut oversized = Vec::new(&env);
     for _ in 0..=MAX_BATCH_REFUNDS {
         oversized.push_back(String::from_str(&env, "UNUSED"));
@@ -1938,10 +2070,7 @@ fn test_batch_refund_expired_rejects_invalid_batches_atomically() {
     assert_eq!(token.balance(&contract_id), 200);
     assert_eq!(client.get_match(&expired).status, MatchStatus::Pending);
     assert_eq!(client.get_match(&not_expired).status, MatchStatus::Pending);
-    assert_eq!(
-        client.get_player_active_matches(&player1).len(),
-        2
-    );
+    assert_eq!(client.get_player_active_matches(&player1).len(), 2);
 }
 
 #[test]
@@ -4229,8 +4358,14 @@ mod extended_tests {
         let contract_balance_after = token.balance(&contract_id);
 
         // Each player gets back their exact 500 wager
-        assert_eq!(player1_balance_after, 5000, "Player 1 should receive 100% of principal (500)");
-        assert_eq!(player2_balance_after, 5000, "Player 2 should receive 100% of principal (500)");
+        assert_eq!(
+            player1_balance_after, 5000,
+            "Player 1 should receive 100% of principal (500)"
+        );
+        assert_eq!(
+            player2_balance_after, 5000,
+            "Player 2 should receive 100% of principal (500)"
+        );
 
         // Treasury receives ZERO fee on cooperative draw
         assert_eq!(
@@ -4239,15 +4374,24 @@ mod extended_tests {
         );
 
         // Contract balance should be zero (no stranded funds)
-        assert_eq!(contract_balance_after, 0, "Contract should hold 0 after draw settlement");
+        assert_eq!(
+            contract_balance_after, 0,
+            "Contract should hold 0 after draw settlement"
+        );
 
         // Verify no fee was collected
         let total_fees = client.get_total_fees_collected(&token.address);
-        assert_eq!(total_fees, 0, "Total fees collected should remain 0 for draw settlement");
+        assert_eq!(
+            total_fees, 0,
+            "Total fees collected should remain 0 for draw settlement"
+        );
 
         // Verify invariant: sum of player balances + contract balance = initial supply
         let total = player1_balance_after + player2_balance_after + contract_balance_after;
-        assert_eq!(total, 10000, "Balance conservation invariant: all funds accounted for");
+        assert_eq!(
+            total, 10000,
+            "Balance conservation invariant: all funds accounted for"
+        );
     }
 
     #[test]
@@ -7145,11 +7289,12 @@ mod extended_tests {
 
             let events = env.events().all();
             for (_contract_id, topic, payload) in events.into_iter() {
-                if topic.len() == 2 {
-                    let t0: Result<Symbol, _> = topic.get(0).unwrap().try_into_val(&env);
-                    if let Ok(sym) = t0 {
+                // Versioned topics: ("v1", "milestone", player).
+                if topic.len() == 3 {
+                    let t1: Result<Symbol, _> = topic.get(1).unwrap().try_into_val(&env);
+                    if let Ok(sym) = t1 {
                         if sym == symbol_short!("milestone") {
-                            let p: Address = topic.get(1).unwrap().try_into_val(&env).unwrap();
+                            let p: Address = topic.get(2).unwrap().try_into_val(&env).unwrap();
                             assert_eq!(p, player1);
                             let (streak, m_type): (u32, Symbol) =
                                 payload.try_into_val(&env).unwrap();
@@ -8050,7 +8195,9 @@ mod extended_tests {
             let t0: Result<Symbol, _> = topics.get(0).unwrap().try_into_val(&env);
             let t1: Result<Symbol, _> = topics.get(1).unwrap().try_into_val(&env);
             let t2: Result<Symbol, _> = topics.get(2).unwrap().try_into_val(&env);
-            t0 == Ok(Symbol::new(&env, "v1")) && t1 == Ok(symbol_short!("escrow")) && t2 == Ok(symbol_short!("created"))
+            t0 == Ok(Symbol::new(&env, "v1"))
+                && t1 == Ok(symbol_short!("escrow"))
+                && t2 == Ok(symbol_short!("created"))
         });
         assert!(create_event.is_some(), "create match event missing");
         let (_, topics, data) = create_event.unwrap();
@@ -8071,7 +8218,9 @@ mod extended_tests {
             let t0: Result<Symbol, _> = topics.get(0).unwrap().try_into_val(&env);
             let t1: Result<Symbol, _> = topics.get(1).unwrap().try_into_val(&env);
             let t2: Result<Symbol, _> = topics.get(2).unwrap().try_into_val(&env);
-            t0 == Ok(Symbol::new(&env, "v1")) && t1 == Ok(symbol_short!("escrow")) && t2 == Ok(symbol_short!("joined"))
+            t0 == Ok(Symbol::new(&env, "v1"))
+                && t1 == Ok(symbol_short!("escrow"))
+                && t2 == Ok(symbol_short!("joined"))
         });
         assert!(join_event.is_some(), "join match event missing");
         let (_, topics, data) = join_event.unwrap();
@@ -8091,11 +8240,13 @@ mod extended_tests {
             let t0: Result<Symbol, _> = topics.get(0).unwrap().try_into_val(&env);
             let t1: Result<Symbol, _> = topics.get(1).unwrap().try_into_val(&env);
             let t2: Result<Symbol, _> = topics.get(2).unwrap().try_into_val(&env);
-            t0 == Ok(Symbol::new(&env, "v1")) && t1 == Ok(symbol_short!("escrow")) && t2 == Ok(symbol_short!("settled"))
+            t0 == Ok(Symbol::new(&env, "v1"))
+                && t1 == Ok(symbol_short!("escrow"))
+                && t2 == Ok(symbol_short!("settled"))
         });
         assert!(settle_event.is_some(), "settle match event missing");
         let (_, topics, data) = settle_event.unwrap();
-        let settle_match_id: u64 = topics.get(2).unwrap().try_into_val(&env).unwrap();
+        let settle_match_id: u64 = topics.get(3).unwrap().try_into_val(&env).unwrap();
         assert_eq!(settle_match_id, 1);
         let (winner, payout, fee): (Address, i128, i128) = data.try_into_val(&env).unwrap();
         assert_eq!(winner, player1);
@@ -8136,7 +8287,9 @@ mod extended_tests {
             let t0: Result<Symbol, _> = topics.get(0).unwrap().try_into_val(&env);
             let t1: Result<Symbol, _> = topics.get(1).unwrap().try_into_val(&env);
             let t2: Result<Symbol, _> = topics.get(2).unwrap().try_into_val(&env);
-            t0 == Ok(Symbol::new(&env, "v1")) && t1 == Ok(symbol_short!("escrow")) && t2 == Ok(symbol_short!("refunded"))
+            t0 == Ok(Symbol::new(&env, "v1"))
+                && t1 == Ok(symbol_short!("escrow"))
+                && t2 == Ok(symbol_short!("refunded"))
         });
         assert!(refund_event.is_some(), "refund event missing");
         let (_, topics, data) = refund_event.unwrap();
@@ -8338,67 +8491,79 @@ mod extended_tests {
         let mut runner = TestRunner::new(ProptestConfig::with_cases(1_000));
 
         runner
-            .run(&scenario, |(player_count, wager, fee_bps, first_bps, second_bps)| {
-                prop_assume!(first_bps + second_bps < 10_000);
-                let third_bps = 10_000 - first_bps - second_bps;
-                let env = Env::default();
-                env.mock_all_auths();
+            .run(
+                &scenario,
+                |(player_count, wager, fee_bps, first_bps, second_bps)| {
+                    prop_assume!(first_bps + second_bps < 10_000);
+                    let third_bps = 10_000 - first_bps - second_bps;
+                    let env = Env::default();
+                    env.mock_all_auths();
 
-                let coordinator = Address::generate(&env);
-                let treasury = Address::generate(&env);
-                let token_admin = Address::generate(&env);
-                let (token, token_admin_client) = create_token_contract(&env, &token_admin);
-                let contract_id = env.register(ChessterEscrow, ());
-                let client = ChessterEscrowClient::new(&env, &contract_id);
-                client.init(&coordinator, &fee_bps);
-                client.set_treasury_vault(&treasury);
-                client.set_tournament_fee_bps(&fee_bps);
-                client.add_supported_token(&token.address);
+                    let coordinator = Address::generate(&env);
+                    let treasury = Address::generate(&env);
+                    let token_admin = Address::generate(&env);
+                    let (token, token_admin_client) = create_token_contract(&env, &token_admin);
+                    let contract_id = env.register(ChessterEscrow, ());
+                    let client = ChessterEscrowClient::new(&env, &contract_id);
+                    client.init(&coordinator, &fee_bps);
+                    client.set_treasury_vault(&treasury);
+                    client.set_tournament_fee_bps(&fee_bps);
+                    client.add_supported_token(&token.address);
 
-                let mut players = alloc::vec::Vec::new();
-                for _ in 0..player_count {
-                    let player = Address::generate(&env);
-                    token_admin_client.mint(&player, &wager);
-                    approve(&env, &token, &player, &contract_id, wager);
-                    players.push(player);
-                }
+                    let mut players = alloc::vec::Vec::new();
+                    for _ in 0..player_count {
+                        let player = Address::generate(&env);
+                        token_admin_client.mint(&player, &wager);
+                        approve(&env, &token, &player, &contract_id, wager);
+                        players.push(player);
+                    }
 
-                let tournament_id = String::from_str(&env, "FUZZ_TOURNAMENT");
-                client.create_tournament(
-                    &tournament_id,
-                    &wager,
-                    &player_count,
-                    &player_count,
-                    &0,
-                    &token.address,
-                );
-                for player in &players {
-                    client.join_tournament(&tournament_id, player);
-                }
+                    let tournament_id = String::from_str(&env, "FUZZ_TOURNAMENT");
+                    client.create_tournament(
+                        &tournament_id,
+                        &wager,
+                        &player_count,
+                        &player_count,
+                        &0,
+                        &token.address,
+                    );
+                    for player in &players {
+                        client.join_tournament(&tournament_id, player);
+                    }
 
-                let winners = vec![&env, players[0].clone(), players[1].clone(), players[2].clone()];
-                let payout_bps = vec![&env, first_bps, second_bps, third_bps];
-                client.complete_tournament(&tournament_id, &winners, &payout_bps);
+                    let winners = vec![
+                        &env,
+                        players[0].clone(),
+                        players[1].clone(),
+                        players[2].clone(),
+                    ];
+                    let payout_bps = vec![&env, first_bps, second_bps, third_bps];
+                    client.complete_tournament(&tournament_id, &winners, &payout_bps);
 
-                let total_pool = wager * player_count as i128;
-                let (net_pool, protocol_fee) = client.calculate_tournament_rake(&total_pool, &fee_bps);
-                let first_payout = (net_pool * first_bps as i128) / 10_000;
-                let second_payout = (net_pool * second_bps as i128) / 10_000;
-                let third_payout = net_pool - first_payout - second_payout;
-                let first_gain = token.balance(&players[0]);
-                let second_gain = token.balance(&players[1]);
-                let third_gain = token.balance(&players[2]);
+                    let total_pool = wager * player_count as i128;
+                    let (net_pool, protocol_fee) =
+                        client.calculate_tournament_rake(&total_pool, &fee_bps);
+                    let first_payout = (net_pool * first_bps as i128) / 10_000;
+                    let second_payout = (net_pool * second_bps as i128) / 10_000;
+                    let third_payout = net_pool - first_payout - second_payout;
+                    let first_gain = token.balance(&players[0]);
+                    let second_gain = token.balance(&players[1]);
+                    let third_gain = token.balance(&players[2]);
 
-                prop_assert_eq!(first_gain, first_payout);
-                prop_assert_eq!(second_gain, second_payout);
-                prop_assert_eq!(third_gain, third_payout);
-                prop_assert!(first_gain > 0 && second_gain > 0 && third_gain > 0);
-                prop_assert_eq!(first_gain + second_gain + third_gain + protocol_fee, total_pool);
-                prop_assert_eq!(token.balance(&treasury), protocol_fee);
-                prop_assert_eq!(token.balance(&contract_id), 0);
-                prop_assert_eq!(client.get_escrowed_balance(&token.address), 0);
-                Ok(())
-            })
+                    prop_assert_eq!(first_gain, first_payout);
+                    prop_assert_eq!(second_gain, second_payout);
+                    prop_assert_eq!(third_gain, third_payout);
+                    prop_assert!(first_gain > 0 && second_gain > 0 && third_gain > 0);
+                    prop_assert_eq!(
+                        first_gain + second_gain + third_gain + protocol_fee,
+                        total_pool
+                    );
+                    prop_assert_eq!(token.balance(&treasury), protocol_fee);
+                    prop_assert_eq!(token.balance(&contract_id), 0);
+                    prop_assert_eq!(client.get_escrowed_balance(&token.address), 0);
+                    Ok(())
+                },
+            )
             .unwrap();
     }
 

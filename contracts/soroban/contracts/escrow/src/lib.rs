@@ -148,10 +148,21 @@ pub enum EscrowError {
     CannotConfirmOwnProposal = 48,
     /// Caller is not an authorized participant in this match (Issue #290).
     UnauthorizedPlayer = 49,
+}
+
+/// Additional escrow errors. Soroban's contract spec caps a `#[contracterror]` enum at
+/// 50 cases and `EscrowError` is full, so new codes continue here from 50 upward.
+/// Codes are unique across both enums and must never be renumbered.
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum EscrowErrorExt {
     /// Mutual cancellation proposal is older than the confirmation window.
     ProposalExpired = 50,
     /// Arithmetic overflow occurred during tournament prize calculation (Issue #484).
     ArithmeticOverflow = 51,
+    /// Wager is below the minimum configured for this specific token (Issue #460).
+    WagerBelowTokenMinimum = 52,
 }
 
 /// Payload for player deposit authorization with nonce-based replay protection (Issue #284).
@@ -758,13 +769,23 @@ pub const TOPIC_REFUNDED: Symbol = symbol_short!("refunded");
 
 /// Centralized event publishing helper to guarantee uniform indexing format across all match lifecycle transitions.
 pub fn emit_match_event(env: &Env, topic: Symbol, match_id: u64, data: Val) {
-    let topics = (Symbol::new(env, "v1"), symbol_short!("escrow"), topic, match_id);
+    let topics = (
+        Symbol::new(env, "v1"),
+        symbol_short!("escrow"),
+        topic,
+        match_id,
+    );
     env.events().publish(topics, data);
 }
 
 /// Centralized event publishing helper for match settlements.
 pub fn emit_match_settled(env: &Env, match_id: u64, winner: &Address, payout: i128, fee: i128) {
-    let topics = (Symbol::new(env, "v1"), symbol_short!("escrow"), symbol_short!("settled"), match_id);
+    let topics = (
+        Symbol::new(env, "v1"),
+        symbol_short!("escrow"),
+        symbol_short!("settled"),
+        match_id,
+    );
     let data = (winner.clone(), payout, fee);
     env.events().publish(topics, data);
 }
@@ -853,23 +874,23 @@ fn checked_mul_div(env: &Env, a: i128, b: i128, denom: i128) -> i128 {
 /// credited to ensure exact total payout (Issue #484).
 fn mul_div_bps(env: &Env, amount: i128, bps: u32) -> (i128, i128) {
     let bps_i128 = i128::from(bps);
-    
+
     // Decompose to avoid overflow: (a/b)*c + (a%b)*c/b
     let whole = (amount / BPS_DENOMINATOR)
         .checked_mul(bps_i128)
-        .unwrap_or_else(|| panic_with_error!(env, EscrowError::ArithmeticOverflow));
-    
+        .unwrap_or_else(|| panic_with_error!(env, EscrowErrorExt::ArithmeticOverflow));
+
     let remainder_part = (amount % BPS_DENOMINATOR)
         .checked_mul(bps_i128)
-        .unwrap_or_else(|| panic_with_error!(env, EscrowError::ArithmeticOverflow));
-    
+        .unwrap_or_else(|| panic_with_error!(env, EscrowErrorExt::ArithmeticOverflow));
+
     let fraction = remainder_part / BPS_DENOMINATOR;
     let residual = remainder_part % BPS_DENOMINATOR;
-    
+
     let quotient = whole
         .checked_add(fraction)
-        .unwrap_or_else(|| panic_with_error!(env, EscrowError::ArithmeticOverflow));
-    
+        .unwrap_or_else(|| panic_with_error!(env, EscrowErrorExt::ArithmeticOverflow));
+
     (quotient, residual)
 }
 
@@ -1005,7 +1026,7 @@ impl ChessterEscrow {
             .set(&Symbol::new(&env, "paused"), &true);
         Self::bump_instance_ttl(&env);
         env.events().publish(
-            (Symbol::new(&env, "v1"), symbol_short!("paused"),),
+            (Symbol::new(&env, "v1"), symbol_short!("paused")),
             ContractPausedEvent { coordinator },
         );
     }
@@ -1022,7 +1043,7 @@ impl ChessterEscrow {
             .set(&Symbol::new(&env, "paused"), &false);
         Self::bump_instance_ttl(&env);
         env.events().publish(
-            (Symbol::new(&env, "v1"), symbol_short!("unpause"),),
+            (Symbol::new(&env, "v1"), symbol_short!("unpause")),
             ContractUnpausedEvent { coordinator },
         );
     }
@@ -1075,7 +1096,7 @@ impl ChessterEscrow {
             .set(&Self::migration_key(&env), &true);
         Self::bump_instance_ttl(&env);
         env.events().publish(
-            (Symbol::new(&env, "v1"), symbol_short!("mig_auth"),),
+            (Symbol::new(&env, "v1"), symbol_short!("mig_auth")),
             MigrationAuthorizedEvent { coordinator },
         );
     }
@@ -1093,7 +1114,7 @@ impl ChessterEscrow {
             .set(&Self::migration_key(&env), &false);
         Self::bump_instance_ttl(&env);
         env.events().publish(
-            (Symbol::new(&env, "v1"), symbol_short!("mig_revk"),),
+            (Symbol::new(&env, "v1"), symbol_short!("mig_revk")),
             MigrationRevokedEvent { coordinator },
         );
     }
@@ -1173,7 +1194,11 @@ impl ChessterEscrow {
         Self::bump_instance_ttl(&env);
 
         env.events().publish(
-            (Symbol::new(&env, "v1"), symbol_short!("emrg_drn"), token.clone()),
+            (
+                Symbol::new(&env, "v1"),
+                symbol_short!("emrg_drn"),
+                token.clone(),
+            ),
             EmergencyDrainEvent {
                 coordinator,
                 token,
@@ -1404,7 +1429,8 @@ impl ChessterEscrow {
         coordinator.require_auth();
 
         env.storage().persistent().remove(&DataKey::DrainSchedule);
-        env.events().publish((Symbol::new(&env, "v1"), symbol_short!("drain_can"),), ());
+        env.events()
+            .publish((Symbol::new(&env, "v1"), symbol_short!("drain_can")), ());
     }
 
     /// Executes a scheduled emergency drain after the 7-day timelock has expired (Issue #285).
@@ -1584,7 +1610,7 @@ impl ChessterEscrow {
         let (rake, _) = mul_div_bps(env, total_pool, fee_bps);
         let net_prize = total_pool
             .checked_sub(rake)
-            .unwrap_or_else(|| panic_with_error!(env, EscrowError::ArithmeticOverflow));
+            .unwrap_or_else(|| panic_with_error!(env, EscrowErrorExt::ArithmeticOverflow));
         (net_prize, rake)
     }
 
@@ -1819,7 +1845,7 @@ impl ChessterEscrow {
         Self::bump_entry_ttl(&env, &Self::pause_confirmations_key(&env));
 
         env.events().publish(
-            (symbol_short!("pause_prop"),),
+            (Symbol::new(&env, "pause_prop"),),
             PauseProposaledEvent {
                 proposer: admin,
                 proposed_at: now,
@@ -1841,7 +1867,7 @@ impl ChessterEscrow {
         }
 
         let pause_key = Self::pause_proposal_key(&env);
-        let mut proposal = env
+        let mut proposal: PauseProposal = env
             .storage()
             .persistent()
             .get(&pause_key)
@@ -1896,10 +1922,10 @@ impl ChessterEscrow {
             Self::bump_entry_ttl(&env, &Self::pause_confirmations_key(&env));
 
             env.events().publish(
-                (symbol_short!("pause_conf"),),
+                (Symbol::new(&env, "pause_conf"),),
                 PauseConfirmedEvent {
                     confirmer: admin,
-                    confirmation_count: confirmations.len() as u32,
+                    confirmation_count: confirmations.len(),
                 },
             );
         }
@@ -1944,7 +1970,7 @@ impl ChessterEscrow {
         Self::bump_entry_ttl(&env, &Self::unpause_confirmations_key(&env));
 
         env.events().publish(
-            (symbol_short!("unpause_prop"),),
+            (Symbol::new(&env, "unpause_prop"),),
             UnpauseProposaledEvent {
                 proposer: admin,
                 proposed_at: now,
@@ -1966,7 +1992,7 @@ impl ChessterEscrow {
         }
 
         let unpause_key = Self::unpause_proposal_key(&env);
-        let mut proposal = env
+        let mut proposal: UnpauseProposal = env
             .storage()
             .persistent()
             .get(&unpause_key)
@@ -2010,7 +2036,7 @@ impl ChessterEscrow {
             let admin2 = confirmations.get(1).unwrap();
 
             env.events().publish(
-                (symbol_short!("unpause_exe"),),
+                (Symbol::new(&env, "unpause_exe"),),
                 MultisigUnpauseExecutedEvent { admin1, admin2 },
             );
         } else {
@@ -2021,10 +2047,10 @@ impl ChessterEscrow {
             Self::bump_entry_ttl(&env, &Self::unpause_confirmations_key(&env));
 
             env.events().publish(
-                (symbol_short!("unpause_conf"),),
+                (Symbol::new(&env, "unpause_conf"),),
                 UnpauseConfirmedEvent {
                     confirmer: admin,
-                    confirmation_count: confirmations.len() as u32,
+                    confirmation_count: confirmations.len(),
                 },
             );
         }
@@ -2230,7 +2256,7 @@ impl ChessterEscrow {
         }
         Self::record_rotation_approval(&env, &signer, &new_coordinator);
         env.events().publish(
-            (Symbol::new(&env, "v1"), symbol_short!("rot_prop"),),
+            (Symbol::new(&env, "v1"), symbol_short!("rot_prop")),
             CoordinatorRotationProposedEvent {
                 proposed_coordinator: new_coordinator,
             },
@@ -2289,7 +2315,7 @@ impl ChessterEscrow {
             env.storage().instance().remove(&key);
             Self::bump_instance_ttl(env);
             env.events().publish(
-                (Symbol::new(&env, "v1"), symbol_short!("rot_exec"),),
+                (Symbol::new(env, "v1"), symbol_short!("rot_exec")),
                 CoordinatorRotationExecutedEvent {
                     new_coordinator: new_coordinator.clone(),
                 },
@@ -2406,7 +2432,7 @@ impl ChessterEscrow {
         Self::bump_instance_ttl(env);
 
         env.events().publish(
-            (Symbol::new(&env, "v1"), symbol_short!("w_limits"),),
+            (Symbol::new(env, "v1"), symbol_short!("w_limits")),
             WagerLimitsUpdatedEvent {
                 min_wager,
                 max_wager,
@@ -2484,7 +2510,11 @@ impl ChessterEscrow {
         Self::bump_instance_ttl(env);
 
         env.events().publish(
-            (Symbol::new(&env, "v1"), symbol_short!("tok_wlim"), token.clone()),
+            (
+                Symbol::new(env, "v1"),
+                symbol_short!("tok_wlim"),
+                token.clone(),
+            ),
             TokenWagerLimitsUpdatedEvent {
                 token: token.clone(),
                 min_wager,
@@ -2518,12 +2548,8 @@ impl ChessterEscrow {
 
     /// Retrieves token-specific wager limits if configured, or falls back to global limits (Issue #23).
     pub fn get_token_wager_limits(env: Env, token: Address) -> WagerLimits {
-        let key = (Symbol::new(&env, "tok_wlim"), token);
-        if let Some(limits) = env.storage().instance().get(&key) {
-            limits
-        } else {
-            Self::get_wager_limits(env)
-        }
+        Self::configured_token_wager_limits(&env, &token)
+            .unwrap_or_else(|| Self::get_wager_limits(env))
     }
 
     /// Retrieves minimum allowable wager limit for specified token (Issue #23).
@@ -2622,7 +2648,7 @@ impl ChessterEscrow {
             .storage()
             .instance()
             .get(&key)
-            .unwrap_or_else(|| Vec::new(&env));
+            .unwrap_or_else(|| Vec::new(env));
 
         if tokens.contains(&token) {
             panic_with_error!(env, EscrowError::TokenAlreadyWhitelisted);
@@ -2820,32 +2846,53 @@ impl ChessterEscrow {
             panic_with_error!(env, EscrowError::InvalidWager);
         }
 
-        // When a per-asset AssetConfig is registered for this token (Issue #431),
-        // it is the authoritative source for enablement and wager bounds,
-        // superseding the legacy global/per-token wager limits below.
+        let decimals = Self::asset_decimals(env, token);
+        let normalized_amount = Self::normalize_wager(env, amount, decimals);
+        let token_limits = Self::configured_token_wager_limits(env, token);
+
+        // A per-asset AssetConfig (Issue #431) supersedes the global limits, but an
+        // explicitly configured per-token minimum/maximum must still hold (Issue #460).
         if let Some(config) = Self::get_asset_config(env.clone(), token.clone()) {
-            // EscrowError is already at the XDR contracterror case limit, so a
-            // disabled asset reuses TokenNotWhitelisted: both mean "this token
+            // A disabled asset reuses TokenNotWhitelisted: both mean "this token
             // cannot currently be wagered with".
             if !config.enabled {
                 panic_with_error!(env, EscrowError::TokenNotWhitelisted);
             }
-            let decimals = Self::asset_decimals(env, token);
-            let normalized_amount = Self::normalize_wager(env, amount, decimals);
             if normalized_amount < config.min_wager {
                 panic_with_error!(env, EscrowError::WagerBelowMinimum);
             }
             if normalized_amount > config.max_wager {
                 panic_with_error!(env, EscrowError::WagerAboveMaximum);
             }
+            if let Some(limits) = token_limits {
+                Self::enforce_token_wager_limits(env, normalized_amount, &limits);
+            }
             return;
         }
 
-        let decimals = Self::asset_decimals(env, token);
-        let normalized_amount = Self::normalize_wager(env, amount, decimals);
-        let limits = Self::get_token_wager_limits(env.clone(), token.clone());
+        if let Some(limits) = token_limits {
+            Self::enforce_token_wager_limits(env, normalized_amount, &limits);
+            return;
+        }
+
+        let limits = Self::get_wager_limits(env.clone());
         if normalized_amount < limits.min_wager {
             panic_with_error!(env, EscrowError::WagerBelowMinimum);
+        }
+        if normalized_amount > limits.max_wager {
+            panic_with_error!(env, EscrowError::WagerAboveMaximum);
+        }
+    }
+
+    /// Returns the limits set via `set_token_wager_limits`, without the global fallback.
+    fn configured_token_wager_limits(env: &Env, token: &Address) -> Option<WagerLimits> {
+        let key = (Symbol::new(env, "tok_wlim"), token.clone());
+        env.storage().instance().get(&key)
+    }
+
+    fn enforce_token_wager_limits(env: &Env, normalized_amount: i128, limits: &WagerLimits) {
+        if normalized_amount < limits.min_wager {
+            panic_with_error!(env, EscrowErrorExt::WagerBelowTokenMinimum);
         }
         if normalized_amount > limits.max_wager {
             panic_with_error!(env, EscrowError::WagerAboveMaximum);
@@ -2861,11 +2908,7 @@ impl ChessterEscrow {
             return amount;
         }
 
-        let exponent = if decimals < 7 {
-            7 - decimals
-        } else {
-            decimals - 7
-        };
+        let exponent = decimals.abs_diff(7);
         let factor = 10_i128
             .checked_pow(exponent)
             .unwrap_or_else(|| panic_with_error!(env, EscrowError::InvalidWager));
@@ -2883,11 +2926,7 @@ impl ChessterEscrow {
         if decimals == 7 {
             return amount;
         }
-        let exponent = if decimals < 7 {
-            7 - decimals
-        } else {
-            decimals - 7
-        };
+        let exponent = decimals.abs_diff(7);
         let factor = 10_i128
             .checked_pow(exponent)
             .unwrap_or_else(|| panic_with_error!(env, EscrowError::InvalidWager));
@@ -2934,7 +2973,11 @@ impl ChessterEscrow {
         Self::bump_instance_ttl(&env);
 
         env.events().publish(
-            (Symbol::new(&env, "v1"), Symbol::new(&env, "asset_config_updated"), token.clone()),
+            (
+                Symbol::new(&env, "v1"),
+                Symbol::new(&env, "asset_config_updated"),
+                token.clone(),
+            ),
             AssetConfigUpdatedEvent {
                 token,
                 min_wager: config.min_wager,
@@ -3118,7 +3161,11 @@ impl ChessterEscrow {
             (player1.clone(), token.clone(), amount).into_val(&env),
         );
         env.events().publish(
-            (Symbol::new(&env, "v1"), symbol_short!("created"), game_code.clone()),
+            (
+                Symbol::new(&env, "v1"),
+                symbol_short!("created"),
+                game_code.clone(),
+            ),
             MatchCreatedEvent {
                 game_code,
                 player1,
@@ -3219,7 +3266,11 @@ impl ChessterEscrow {
             (player2.clone(), m.total_staked).into_val(&env),
         );
         env.events().publish(
-            (Symbol::new(&env, "v1"), symbol_short!("funded"), game_code.clone()),
+            (
+                Symbol::new(&env, "v1"),
+                symbol_short!("funded"),
+                game_code.clone(),
+            ),
             MatchFundedEvent {
                 game_code,
                 player2,
@@ -3400,7 +3451,11 @@ impl ChessterEscrow {
             Self::bump_entry_ttl(&env, &DataKey::Metrics);
 
             env.events().publish(
-                (Symbol::new(&env, "v1"), symbol_short!("cancelled"), game_code.clone()),
+                (
+                    Symbol::new(&env, "v1"),
+                    symbol_short!("cancelled"),
+                    game_code.clone(),
+                ),
                 MatchCancelledEvent {
                     game_code: game_code.clone(),
                 },
@@ -3514,7 +3569,11 @@ impl ChessterEscrow {
             Self::settle_match(&env, &coordinator, &game_code, &mut m, None);
 
             env.events().publish(
-                (Symbol::new(&env, "v1"), symbol_short!("resolved"), game_code.clone()),
+                (
+                    Symbol::new(&env, "v1"),
+                    symbol_short!("resolved"),
+                    game_code.clone(),
+                ),
                 MatchResolvedEvent {
                     game_code: game_code.clone(),
                     winner: None,
@@ -3687,7 +3746,11 @@ impl ChessterEscrow {
         );
 
         env.events().publish(
-            (Symbol::new(&env, "v1"), symbol_short!("timeout"), game_code.clone()),
+            (
+                Symbol::new(&env, "v1"),
+                symbol_short!("timeout"),
+                game_code.clone(),
+            ),
             MatchTimeoutClaimedEvent {
                 game_code,
                 claimant,
@@ -3724,7 +3787,11 @@ impl ChessterEscrow {
         Self::settle_match(&env, &coordinator, &game_code, &mut m, Some(winner.clone()));
 
         env.events().publish(
-            (Symbol::new(&env, "v1"), symbol_short!("forfeited"), game_code.clone()),
+            (
+                Symbol::new(&env, "v1"),
+                symbol_short!("forfeited"),
+                game_code.clone(),
+            ),
             MatchForfeitedEvent {
                 game_code,
                 forfeiting_player,
@@ -3764,7 +3831,11 @@ impl ChessterEscrow {
         Self::execute_emergency_refund(&env, &game_code, &mut m);
 
         env.events().publish(
-            (Symbol::new(&env, "v1"), symbol_short!("emer_ref"), game_code.clone()),
+            (
+                Symbol::new(&env, "v1"),
+                symbol_short!("emer_ref"),
+                game_code.clone(),
+            ),
             MatchEmergencyRefundedEvent { game_code, caller },
         );
     }
@@ -3827,8 +3898,14 @@ impl ChessterEscrow {
             if admin_fee > 0 {
                 token_client.transfer(&env.current_contract_address(), &fee_recipient, &admin_fee);
                 let fee_key = DataKey::TotalFeesCollected(m.token.clone());
-                let total = env.storage().persistent().get::<_, i128>(&fee_key).unwrap_or(0);
-                env.storage().persistent().set(&fee_key, &checked_add(env, total, admin_fee));
+                let total = env
+                    .storage()
+                    .persistent()
+                    .get::<_, i128>(&fee_key)
+                    .unwrap_or(0);
+                env.storage()
+                    .persistent()
+                    .set(&fee_key, &checked_add(env, total, admin_fee));
                 Self::bump_entry_ttl(env, &fee_key);
             }
         } else {
@@ -3941,7 +4018,11 @@ impl ChessterEscrow {
 
     fn emit_milestone_event(env: &Env, player: Address, streak_count: u32, milestone_type: Symbol) {
         env.events().publish(
-            (Symbol::new(env, "v1"), symbol_short!("milestone"), player.clone()),
+            (
+                Symbol::new(env, "v1"),
+                symbol_short!("milestone"),
+                player.clone(),
+            ),
             (streak_count, milestone_type),
         );
     }
@@ -4166,7 +4247,7 @@ impl ChessterEscrow {
 
         let count = game_codes.len();
         env.events().publish(
-            (Symbol::new(&env, "v1"), Symbol::new(&env, "batch_refunded"),),
+            (Symbol::new(&env, "v1"), Symbol::new(&env, "batch_refunded")),
             BatchRefundedEvent { count, game_codes },
         );
         count
@@ -4237,7 +4318,11 @@ impl ChessterEscrow {
         Self::execute_refund(&env, &game_code, &mut m);
 
         env.events().publish(
-            (Symbol::new(&env, "v1"), symbol_short!("autoref"), game_code.clone()),
+            (
+                Symbol::new(&env, "v1"),
+                symbol_short!("autoref"),
+                game_code.clone(),
+            ),
             MatchAutoRefunded {
                 game_code,
                 player1,
@@ -4364,7 +4449,11 @@ impl ChessterEscrow {
             Self::bump_entry_ttl(&env, &sp_key);
 
             env.events().publish(
-                (Symbol::new(&env, "v1"), symbol_short!("funded"), game_code.clone()),
+                (
+                    Symbol::new(&env, "v1"),
+                    symbol_short!("funded"),
+                    game_code.clone(),
+                ),
                 MatchFundedEvent {
                     game_code: game_code.clone(),
                     player2: player.clone(),
@@ -4373,7 +4462,11 @@ impl ChessterEscrow {
             );
 
             env.events().publish(
-                (Symbol::new(&env, "v1"), symbol_short!("spons"), game_code.clone()),
+                (
+                    Symbol::new(&env, "v1"),
+                    symbol_short!("spons"),
+                    game_code.clone(),
+                ),
                 SponsoredDepositEvent {
                     game_code,
                     player,
@@ -4470,7 +4563,11 @@ impl ChessterEscrow {
             Self::bump_entry_ttl(&env, &sp_key);
 
             env.events().publish(
-                (Symbol::new(&env, "v1"), symbol_short!("created"), game_code.clone()),
+                (
+                    Symbol::new(&env, "v1"),
+                    symbol_short!("created"),
+                    game_code.clone(),
+                ),
                 MatchCreatedEvent {
                     game_code: game_code.clone(),
                     player1: player.clone(),
@@ -4480,7 +4577,11 @@ impl ChessterEscrow {
             );
 
             env.events().publish(
-                (Symbol::new(&env, "v1"), symbol_short!("spons"), game_code.clone()),
+                (
+                    Symbol::new(&env, "v1"),
+                    symbol_short!("spons"),
+                    game_code.clone(),
+                ),
                 SponsoredDepositEvent {
                     game_code,
                     player,
@@ -4549,7 +4650,7 @@ impl ChessterEscrow {
         if env.ledger().timestamp()
             > m.cancellation_proposed_at.unwrap_or(0) + CANCELLATION_PROPOSAL_TIMEOUT_SECS
         {
-            panic_with_error!(&env, EscrowError::ProposalExpired);
+            panic_with_error!(&env, EscrowErrorExt::ProposalExpired);
         }
 
         if proposer == opponent {
@@ -4568,7 +4669,11 @@ impl ChessterEscrow {
         Self::bump_entry_ttl(&env, &game_code);
 
         env.events().publish(
-            (Symbol::new(&env, "v1"), symbol_short!("mut_canc"), game_code.clone()),
+            (
+                Symbol::new(&env, "v1"),
+                symbol_short!("mut_canc"),
+                game_code.clone(),
+            ),
             MatchMutualCancelled {
                 game_code,
                 proposed_by: proposer,
@@ -4660,13 +4765,21 @@ impl ChessterEscrow {
             (None::<Address>, m.total_staked, 0_i128).into_val(env),
         );
         env.events().publish(
-            (Symbol::new(&env, "v1"), symbol_short!("refunded"), game_code.clone()),
+            (
+                Symbol::new(env, "v1"),
+                symbol_short!("refunded"),
+                game_code.clone(),
+            ),
             MatchRefundedEvent {
                 game_code: game_code.clone(),
             },
         );
         env.events().publish(
-            (Symbol::new(&env, "v1"), symbol_short!("expired"), game_code.clone()),
+            (
+                Symbol::new(env, "v1"),
+                symbol_short!("expired"),
+                game_code.clone(),
+            ),
             MatchExpiredEvent {
                 game_code: game_code.clone(),
             },
@@ -5048,7 +5161,11 @@ impl ChessterEscrow {
         Self::bump_entry_ttl(&env, &tournament_id);
 
         env.events().publish(
-            (Symbol::new(&env, "v1"), symbol_short!("tourn_crt"), tournament_id),
+            (
+                Symbol::new(&env, "v1"),
+                symbol_short!("tourn_crt"),
+                tournament_id,
+            ),
             (buy_in_amount, effective_max, effective_min),
         );
     }
@@ -5121,7 +5238,12 @@ impl ChessterEscrow {
         Self::assert_balance_invariant(&env, &tournament.token);
 
         env.events().publish(
-            (Symbol::new(&env, "v1"), symbol_short!("tourn_jn"), tournament_id, player),
+            (
+                Symbol::new(&env, "v1"),
+                symbol_short!("tourn_jn"),
+                tournament_id,
+                player,
+            ),
             tournament.total_pool,
         );
     }
@@ -5202,7 +5324,8 @@ impl ChessterEscrow {
                 }
             }
         }
-        let (net_pool, rake) = Self::calculate_tournament_rake(&env, tournament.total_pool, fee_bps);
+        let (net_pool, rake) =
+            Self::calculate_tournament_rake(&env, tournament.total_pool, fee_bps);
 
         tournament.status = TournamentStatus::Completed;
         tournament.final_rankings = winners.clone();
@@ -5217,7 +5340,7 @@ impl ChessterEscrow {
         let mut total_distributed: i128 = 0;
         let num_winners = winners.len();
         let mut accumulated_residuals: i128 = 0;
-        
+
         for i in 0..num_winners {
             let winner = winners.get(i).unwrap();
             let bps = payout_bps.get(i).unwrap();
@@ -5225,28 +5348,29 @@ impl ChessterEscrow {
                 // Last winner gets the remainder to ensure total payout equals net_pool exactly
                 let final_payout = net_pool
                     .checked_sub(total_distributed)
-                    .unwrap_or_else(|| panic_with_error!(&env, EscrowError::ArithmeticOverflow));
+                    .unwrap_or_else(|| panic_with_error!(&env, EscrowErrorExt::ArithmeticOverflow));
                 (final_payout, 0)
             } else {
                 mul_div_bps(&env, net_pool, bps)
             };
-            
+
             // Apply accumulated residuals to first place winner (Issue #484)
             let payout = if i == 0 {
-                payout_base.checked_add(accumulated_residuals)
-                    .unwrap_or_else(|| panic_with_error!(&env, EscrowError::ArithmeticOverflow))
+                payout_base
+                    .checked_add(accumulated_residuals)
+                    .unwrap_or_else(|| panic_with_error!(&env, EscrowErrorExt::ArithmeticOverflow))
             } else {
                 payout_base
             };
-            
+
             total_distributed = total_distributed
                 .checked_add(payout)
-                .unwrap_or_else(|| panic_with_error!(&env, EscrowError::ArithmeticOverflow));
-            
+                .unwrap_or_else(|| panic_with_error!(&env, EscrowErrorExt::ArithmeticOverflow));
+
             // Accumulate residuals from this prize tier
             accumulated_residuals = accumulated_residuals
                 .checked_add(residual)
-                .unwrap_or_else(|| panic_with_error!(&env, EscrowError::ArithmeticOverflow));
+                .unwrap_or_else(|| panic_with_error!(&env, EscrowErrorExt::ArithmeticOverflow));
 
             if payout > 0 {
                 let is_disqualified = tournament.disqualified.get(winner.clone()).unwrap_or(false);
@@ -5262,7 +5386,7 @@ impl ChessterEscrow {
 
         let total_out = total_distributed
             .checked_add(rake)
-            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::ArithmeticOverflow));
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowErrorExt::ArithmeticOverflow));
         if total_out != tournament.total_pool {
             panic_with_error!(&env, EscrowError::InvariantViolated);
         }
@@ -5271,7 +5395,11 @@ impl ChessterEscrow {
         Self::assert_balance_invariant(&env, &tournament.token);
 
         env.events().publish(
-            (Symbol::new(&env, "v1"), symbol_short!("tourn_cmp"), tournament_id),
+            (
+                Symbol::new(&env, "v1"),
+                symbol_short!("tourn_cmp"),
+                tournament_id,
+            ),
             (winners, tournament.total_pool, rake),
         );
     }
@@ -5309,7 +5437,11 @@ impl ChessterEscrow {
         Self::bump_entry_ttl(&env, &tournament_id);
 
         env.events().publish(
-            (Symbol::new(&env, "v1"), symbol_short!("tourn_can"), tournament_id),
+            (
+                Symbol::new(&env, "v1"),
+                symbol_short!("tourn_can"),
+                tournament_id,
+            ),
             tournament.players.len(),
         );
     }
@@ -5367,7 +5499,12 @@ impl ChessterEscrow {
         Self::assert_balance_invariant(&env, &tournament.token);
 
         env.events().publish(
-            (Symbol::new(&env, "v1"), symbol_short!("tourn_ref"), tournament_id, player),
+            (
+                Symbol::new(&env, "v1"),
+                symbol_short!("tourn_ref"),
+                tournament_id,
+                player,
+            ),
             tournament.buy_in_amount,
         );
     }
@@ -5405,7 +5542,11 @@ impl ChessterEscrow {
         Self::bump_entry_ttl(&env, &tournament_id);
 
         env.events().publish(
-            (Symbol::new(&env, "v1"), symbol_short!("tourn_dq"), tournament_id),
+            (
+                Symbol::new(&env, "v1"),
+                symbol_short!("tourn_dq"),
+                tournament_id,
+            ),
             (player, reason_code),
         );
     }
@@ -5469,7 +5610,11 @@ impl ChessterEscrow {
             STORAGE_TTL_EXTENDED,
         );
         env.events().publish(
-            (Symbol::new(&env, "v1"), symbol_short!("elo_r"), player.clone()),
+            (
+                Symbol::new(&env, "v1"),
+                symbol_short!("elo_r"),
+                player.clone(),
+            ),
             PlayerEloUpdatedEvent { player, new_elo },
         );
     }
@@ -5564,6 +5709,6 @@ impl ChessterEscrow {
     }
 }
 
-mod test;
 #[cfg(test)]
 mod error_tests;
+mod test;
