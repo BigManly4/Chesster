@@ -38,7 +38,12 @@ const {
 const gameController = require("./controllers/gameController");
 const { createRateLimiter } = require("./middleware/rateLimiter");
 const { sanitizeInput } = require("./middleware/sanitizeInput");
-const { moderateMessage, checkSlowMode } = require("./services/chatService");
+const {
+  moderateMessage,
+  checkSlowMode,
+  enforceChatRateLimit,
+  clearChatRateLimit,
+} = require("./services/chatService");
 const { JWT_SECRET } = require("./middleware/authMiddleware");
 const { createSocketRateLimiter } = require("./middleware/socketRateLimiter");
 const { csrfProtection, generateSignedToken, setCsrfCookie } = require("./middleware/csrfMiddleware");
@@ -397,6 +402,8 @@ io.on("connection", (socket) => {
   });
 
   socket.on("disconnect", async () => {
+    // Release this socket's chat rate limiter buckets (Issue #464).
+    clearChatRateLimit(socket.id);
     metricsRoutes.setConnectedClients(io.engine.clientsCount);
     metricsRoutes.markGameDisconnected(socket.data?.gameCode);
     const { gameCode, playerColor } = socket.data || {};
@@ -626,6 +633,9 @@ io.on("connection", (socket) => {
     if (!code || !playerColor || !message) return;
     if (!["white", "black"].includes(playerColor)) return;
 
+    // At most 5 messages per rolling 10s window per socket and room (Issue #464).
+    if (!enforceChatRateLimit(socket, code)) return;
+
     const moderation = moderateMessage(message);
     if (!moderation.accepted) return;
 
@@ -701,11 +711,14 @@ app.set("io", io);
 timerService.init(io);
 // Stop the auth challenge sweep timer on shutdown so the event loop exits cleanly.
 const authService = require("./services/authService");
+const botService = require("./services/botService");
 if (require.main === module) {
 	for (const signal of ["SIGTERM", "SIGINT"]) {
-		process.on(signal, () => {
+		process.on(signal, async () => {
 			try {
 				authService.stop();
+				// Terminate bot workers and kill their Stockfish processes so none are orphaned.
+				await botService.shutdown();
 			} finally {
 				process.exit(0);
 			}

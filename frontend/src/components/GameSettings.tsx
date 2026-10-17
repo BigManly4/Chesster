@@ -15,6 +15,8 @@ export default function GameSettings({ hideFloating = false }: { hideFloating?: 
   const toggleMoveConfirmation = useGameStore((s) => s.toggleMoveConfirmation);
   const masterVolume = useGameStore((s) => s.masterVolume);
   const setMasterVolume = useGameStore((s) => s.setMasterVolume);
+  const pieceSet = useGameStore((s) => s.pieceSet);
+  const setPieceSet = useGameStore((s) => s.setPieceSet);
   const boardTheme = useThemeStore((s) => s.boardTheme);
   const setBoardTheme = useThemeStore((s) => s.setBoardTheme);
   const isSettingsOpen = useGameStore((s) => s.isSettingsOpen);
@@ -135,6 +137,33 @@ export default function GameSettings({ hideFloating = false }: { hideFloating?: 
                       <span style={{ backgroundColor: theme.light }} />
                     </span>
                     <span>{theme.name}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="flex flex-col gap-3 border-t border-(--border) pt-3">
+              <span className="text-sm font-semibold">Piece set</span>
+              <div className="grid grid-cols-3 gap-2">
+                {[
+                  { key: "classic" as const, name: "Classic", symbol: "♔" },
+                  { key: "neo" as const, name: "Neo", symbol: "♔" },
+                  { key: "wood" as const, name: "Wood", symbol: "♔" },
+                ].map((set) => (
+                  <button
+                    key={set.key}
+                    type="button"
+                    onClick={() => setPieceSet(set.key)}
+                    aria-label={`Select ${set.name} piece set`}
+                    aria-pressed={pieceSet === set.key}
+                    className={`flex flex-col items-center justify-center gap-1 rounded-lg border p-3 text-center text-xs transition-colors ${
+                      pieceSet === set.key
+                        ? "border-(--accent-primary) ring-2 ring-(--accent-primary)/40 bg-(--bg-tertiary)"
+                        : "border-(--border) hover:border-(--accent-primary)/60"
+                    }`}
+                  >
+                    <span className="text-2xl leading-none">{set.symbol}</span>
+                    <span className="font-semibold text-xs">{set.name}</span>
                   </button>
                 ))}
               </div>
