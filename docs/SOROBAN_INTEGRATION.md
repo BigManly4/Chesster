@@ -45,7 +45,9 @@ time-to-live whenever it is read or written so active matches are not archived b
 | `DataKey::PlayerRating(Address)` | rating record | Committed Elo rating state for a player. |
 | `DataKey::AccountNonce(Address)` | `u64` | Per-account deposit nonce for signed-deposit replay protection. |
 | `DataKey::DrainSchedule` | `(Address, u64)` | Pending `(recipient, unlock_timestamp)` for the emergency drain timelock. |
-| `(side_p, game_code)` | `SidePool` | Spectator side-bet pool for a match. |
+| `DataKey::SideBetPool(game_code)` | `SideBetLedger` | Spectator side pool: White/Black totals, settlement outcome, fee taken, and unclaimed balances. Outlives the match record until every bettor has claimed. |
+| `DataKey::SideBetStake(game_code, bettor, PlayerColor)` | `i128` | One spectator's unclaimed stake on one side; removed when claimed. |
+| `(side_p, game_code)` | `SidePool` | Legacy (pre-ledger) side-bet pool. No longer written; existing pools are still paid out when their match ends. |
 | `(dispute, game_code)` | `Dispute` | Active dispute record and its 48-hour timelock. |
 | `(act_m, player_address)` | `Vec<String>` | List of game codes the player currently has active, used to enforce the max-active-matches limit. |
 | `(sp_exp, player_address)` | signed-deposit data | Sponsored-deposit bookkeeping for gasless player onboarding flows. |
@@ -141,6 +143,29 @@ enum defined in `contracts/soroban/contracts/escrow/src/lib.rs`.
 | `NoCancellationProposed` | 47 | No mutual-cancellation proposal exists to confirm. | Have one player propose cancellation before the other confirms it. |
 | `CannotConfirmOwnProposal` | 48 | The same player tried to confirm their own cancellation proposal. | Confirmation must come from the other participant. |
 | `UnauthorizedPlayer` | 49 | Caller is not an authorized participant (`player1`/`player2`) for this action. | Call `emergency_refund` / cancellation confirmation using a wallet that is actually in the match. |
+
+A Soroban error enum holds at most 50 cases, so codes from 50 upward are raised as `EscrowErrorExt`:
+
+| Error | Code | Cause | Recommended action |
+| --- | --- | --- | --- |
+| `SideBetsNotSettled` | 54 | `claim_side_bet` was called before the match ended. | Claim after the match is resolved, refunded, or cancelled. |
+| `SideBetTokenMismatch` | 55 | `place_side_bet` used a token other than the match wager token. | Pass the match's `token`. |
+
+## Spectator side bets
+
+Spectators back White (`player1`) or Black (`player2`) with `place_side_bet(game_code, bettor, chosen_player, token, amount)`.
+Stakes must use the match token, respect the token's wager limits, and come from a wallet that is not playing the match.
+Betting is open while the match is `Pending`/`Active` and not expired; the coordinator can close it earlier with
+`close_side_betting(game_code)` (for example, once the game reaches move 10).
+
+When the match ends the side pool is settled without iterating over bettors, and each spectator withdraws with
+`claim_side_bet(game_code, bettor)`:
+
+- **Decisive result:** the coordinator-configured fee (`set_side_bet_fee_bps`, at most `MAX_SIDE_BET_FEE_BPS` = 500) is
+  taken from the losing pool and sent to the treasury vault (or the coordinator if none is set). Each winning bettor
+  receives `stake + floor(stake * (losing_pool - fee) / winning_pool)`, and the final winning claim sends the rounding
+  remainder to the treasury, so payouts plus fees always equal the total staked. Losing stakes claim zero.
+- **Draw, refund, cancellation, or nobody backed the winner:** every stake is returned in full with no fee.
 
 ## Token precision and decimal handling
 
